@@ -12,6 +12,8 @@ function createFakeInstagram() {
     sent: [], // gönderilen tüm DM ve yanıtlar
     requests: [],
     failNext: null, // { status, body }
+    rateLimitProfile: false, // profil isteğine 429 (gerçek Instagram'da görülen durum)
+    rurSeen: 0, // sunucunun verdiği rur çerezini geri gönderen istek sayısı (tarayıcı çerez kavanozu kanıtı)
     logins: 0,
   };
   // Gerçek Instagram id'leri 2^53'ten büyüktür; istemcinin hassasiyet kaybetmediğini test etmek için
@@ -58,9 +60,10 @@ function createFakeInstagram() {
   };
 
   // Büyük sayıları JSON'a tırnaksız (gerçek Instagram gibi) yazar
+  let rur = 0;
   function send(res, status, body, headers = {}) {
     const json = JSON.stringify(body).replace(/"(\d{16,})"/g, '$1');
-    res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Set-Cookie': `rur=R${++rur}; Path=/`, ...headers });
     res.end(json);
   }
   function html(res, status, body, headers = {}) {
@@ -137,7 +140,9 @@ function createFakeInstagram() {
       });
       let m;
 
+      if (c.rur) state.rurSeen++;
       if ((m = p.match(/^\/api\/v1\/users\/([^/]+)\/info\/$/))) {
+        if (state.rateLimitProfile) return send(res, 429, {});
         const u = Object.values(state.accounts).find((a) => a.pk === m[1]);
         if (!u) return send(res, 404, { message: 'User not found', status: 'fail' });
         return send(res, 200, { user: { pk: u.pk, username: u.username, full_name: u.username, profile_pic_url: '' }, status: 'ok' });

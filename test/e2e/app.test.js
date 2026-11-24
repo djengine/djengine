@@ -102,6 +102,8 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
   });
 
   await t.test('iki hesap kullanıcı adı ve şifreyle, ek pencere görmeden bağlanır', async () => {
+    // Gerçek Instagram girişten hemen sonraki profil isteğine 429 dönebiliyor; giriş yine de tamamlanmalı
+    fake.state.rateLimitProfile = true;
     for (const [name, pass] of [[U1, 'dj-sifre'], ['@' + U2, 'gs-sifre']]) {
       await loginWith(name, pass);
       await page.locator(`[data-testid="account-${name.replace('@', '')}"]`).waitFor();
@@ -109,6 +111,7 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
     const shown = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().filter((w) => w.isVisible()).length);
     assert.equal(shown, 1, 'başarılı girişte Instagram penceresi görünmemeli');
     assert.equal(await page.locator('[data-testid="ig-password"]').inputValue(), '');
+    fake.state.rateLimitProfile = false;
     await page.screenshot({ path: path.join(SHOTS, '02-hesaplar.png') });
   });
 
@@ -165,6 +168,7 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
     await page.click('[data-view="overview"]');
     await page.click('[data-testid="check-now"]');
     await waitFor(() => fake.state.sent.length >= 3);
+    assert.ok(fake.state.rurSeen > 0, 'istekler tarayıcı oturumundan gitmeli (Instagram\'ın yenilediği çerezler geri gönderilmeli)');
     const kinds = fake.state.sent.map((s) => `${s.kind}:${s.to || ''}`).sort();
     assert.deepEqual(kinds, ['dm:u-dinleyici2', 'dm:u-turist', 'public_reply:']);
     const pr = fake.state.sent.find((s) => s.to === 'u-dinleyici2');
@@ -226,6 +230,8 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
     }, 10000).catch(() => {});
     const raw = fs.readFileSync(path.join(userData, 'data.json'), 'utf8');
     assert.ok(!raw.includes('sessionid=') || process.platform === 'linux', 'Mac\'te oturum bilgisi şifreli olmalı');
+    // Linux'ta Anahtar Zinciri yok, kayıt okunabilir: Instagram'ın yenilediği çerez kayda geri yazılmış olmalı
+    if (process.platform === 'linux') assert.match(raw, /rur=R\d+/);
     app = await launch(userData, fake.url);
     const p2 = await app.firstWindow();
     const s = await p2.evaluate(() => window.api.state());

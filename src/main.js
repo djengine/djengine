@@ -4,7 +4,7 @@ const path = require('path');
 const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, powerSaveBlocker, safeStorage, shell, Notification, session } = require('electron');
 const { Store } = require('./core/store');
 const { Engine } = require('./core/engine');
-const { InstagramClient, USER_AGENT } = require('./core/instagram');
+const { InstagramClient, USER_AGENT, parseCookies } = require('./core/instagram');
 
 if (process.env.DMO_USER_DATA) app.setPath('userData', process.env.DMO_USER_DATA);
 
@@ -51,6 +51,7 @@ async function runTick() {
   const before = store.data.log.length ? store.data.log[0].id : null;
   try {
     await engine.tick();
+    await syncCookies();
   } catch (e) {
     store.addLog({ type: 'error', message: `Beklenmeyen hata: ${e.message}` });
     store.save();
@@ -212,6 +213,64 @@ function loginWithInstagram({ username, password }) {
   });
 }
 
+// ---- Hesap başına tarayıcı oturumu ----
+// Instagram'a giden tüm istekler, girişte kullanılan Chromium ağ katmanından gider: çerezler
+// oturumda tutulur, Instagram'ın yenilediği çerezler otomatik saklanır ve istekler gerçek
+// tarayıcıdan gelmiş görünür (Node'un kendi bağlantısı Instagram'da sık sık "429" alıyor).
+const IG_BASE = () => (process.env.IG_WEB_BASE || 'https://www.instagram.com').replace(/\/$/, '');
+const seeded = new Map(); // igUserId -> oturuma son yüklenen çerez metni
+
+function igSession(igUserId) {
+  const ses = session.fromPartition(`ig-${igUserId}`);
+  ses.setUserAgent(USER_AGENT);
+  return ses;
+}
+
+async function seedCookies(igUserId, cookieStr) {
+  if (seeded.get(igUserId) === cookieStr) return;
+  const ses = igSession(igUserId);
+  await ses.clearStorageData({ storages: ['cookies'] });
+  const url = IG_BASE();
+  const secure = url.startsWith('https:');
+  for (const part of String(cookieStr).split(';')) {
+    const i = part.indexOf('=');
+    if (i <= 0) continue;
+    const name = part.slice(0, i).trim();
+    const value = part.slice(i + 1).trim();
+    await ses.cookies.set({ url, name, value, path: '/', secure, ...(secure ? { domain: '.instagram.com' } : {}) });
+  }
+  seeded.set(igUserId, cookieStr);
+}
+
+function clientFor(cookieStr, igUserId) {
+  const ses = igSession(igUserId);
+  let ready = null;
+  const browserFetch = async (u, opts) => {
+    ready = ready || seedCookies(igUserId, cookieStr);
+    await ready;
+    return ses.fetch(String(u), opts);
+  };
+  return new InstagramClient(cookieStr, { browserFetch });
+}
+
+// Instagram'ın yenilediği çerezleri (oturum süresini uzatır) şifreli kayda geri yaz
+async function syncCookies() {
+  let changed = false;
+  for (const acc of store.data.accounts) {
+    // Oturum bu kayıttaki çerezlerle yüklenmemişse (örn. arada yeniden giriş yapıldıysa) dokunma
+    if (!acc.token || seeded.get(acc.igUserId) !== acc.token) continue;
+    const cookies = await igSession(acc.igUserId).cookies.get({ url: IG_BASE() });
+    if (!cookies.some((c) => c.name === 'sessionid' && c.value)) continue;
+    const str = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+    if (str !== acc.token) {
+      acc.token = str;
+      seeded.set(acc.igUserId, str);
+      changed = true;
+    }
+  }
+  if (changed) store.save();
+}
+
 // ---- IPC ----
 function registerIpc() {
   const handle = (name, fn) =>
@@ -233,15 +292,24 @@ function registerIpc() {
     if (!/^[A-Za-z0-9._]{1,30}$/.test(username)) throw new Error('Kullanıcı adı sadece harf, rakam, nokta ve alt çizgi içerebilir.');
     if (!password) throw new Error('Şifrenizi yazın.');
     const cookies = await loginWithInstagram({ username, password });
-    const me = await new InstagramClient(cookies).me();
-    if (!me.user_id || !me.username) throw new Error('Hesap bilgisi alınamadı, lütfen tekrar deneyin.');
+    const igUserId = parseCookies(cookies).ds_user_id;
+    if (!igUserId) throw new Error('Instagram girişi tamamlanmadı, lütfen tekrar deneyin.');
+    // Giriş tamam. Profil bilgisi (ad, fotoğraf) sadece süs: alınamazsa (örn. Instagram
+    // "çok fazla istek" derse) hesap yine de kaydedilir, tekrar giriş gerekmez.
+    let me = {};
+    try {
+      me = await clientFor(cookies, igUserId).me();
+    } catch (e) {
+      if (e.isAuth) throw e;
+    }
+    const prev = store.data.accounts.find((a) => a.igUserId === igUserId);
     const now = new Date().toISOString();
     const acc = store.upsertAccount({
-      igUserId: String(me.user_id),
-      username: me.username,
-      name: me.name || '',
-      picture: me.profile_picture_url || '',
-      accountType: me.account_type || '',
+      igUserId,
+      username: me.username || username,
+      name: me.name || (prev && prev.name) || '',
+      picture: me.profile_picture_url || (prev && prev.picture) || '',
+      accountType: me.account_type || (prev && prev.accountType) || '',
       token: cookies,
       connectedAt: now,
       status: 'ok',
@@ -253,12 +321,19 @@ function registerIpc() {
     return { id: acc.id, username: acc.username };
   });
 
-  handle('account:remove', (id) => store.removeAccount(id));
+  handle('account:remove', async (id) => {
+    const acc = store.getAccount(id);
+    store.removeAccount(id);
+    if (acc) {
+      seeded.delete(acc.igUserId);
+      await igSession(acc.igUserId).clearStorageData().catch(() => {});
+    }
+  });
 
   handle('account:media', async (id) => {
     const acc = store.getAccount(id);
     if (!acc || !acc.token) throw new Error('Hesap bulunamadı.');
-    return new InstagramClient(acc.token).recentMedia(30);
+    return clientFor(acc.token, acc.igUserId).recentMedia(30);
   });
 
   handle('rule:save', (rule) => {
@@ -386,7 +461,7 @@ app.on('window-all-closed', (e) => e.preventDefault && e.preventDefault());
 app.whenReady().then(() => {
   store = new Store(path.join(app.getPath('userData'), 'data.json'), { encrypt, decrypt });
   if (store.settings.notifications == null) store.updateSettings({ notifications: true });
-  engine = new Engine({ store });
+  engine = new Engine({ store, clientFactory: (cookies, acc) => clientFor(cookies, acc.igUserId) });
   store.onChange(pushState);
   registerIpc();
   createTray();

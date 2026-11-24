@@ -48,7 +48,7 @@ class Engine {
   }
 
   async pollAccount(acc) {
-    const client = this.clientFactory(acc.token);
+    const client = this.clientFactory(acc.token, acc);
     try {
       const commentRules = this.rulesFor(acc, 'comment');
       const dmRules = this.rulesFor(acc, 'dm');

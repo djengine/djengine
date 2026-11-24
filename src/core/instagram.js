@@ -64,12 +64,15 @@ function normalizeMedia(m) {
 
 class InstagramClient {
   // `session`: giriş penceresinden alınan çerezler ("sessionid=...; csrftoken=...; ds_user_id=...").
-  constructor(session, { baseUrl, fetchImpl } = {}) {
+  // `browserFetch`: Electron'un tarayıcı oturumundan istek atan fetch. Verilirse çerezleri ve
+  // tarayıcı kimliğini (User-Agent) oturum yönetir; Instagram istekleri gerçek tarayıcıdan gelmiş görür.
+  constructor(session, { baseUrl, fetchImpl, browserFetch } = {}) {
     this.session = session;
     this.cookies = parseCookies(session);
     this.userId = this.cookies.ds_user_id || null;
     this.base = (baseUrl || process.env.IG_WEB_BASE || DEFAULT_BASE).replace(/\/$/, '');
-    this.fetch = fetchImpl || globalThis.fetch;
+    this.browser = !!browserFetch;
+    this.fetch = browserFetch || fetchImpl || globalThis.fetch;
     this.threads = new Map(); // son gelen kutusu okumasındaki konuşmalar
   }
 
@@ -77,8 +80,6 @@ class InstagramClient {
     const u = new URL(`${this.base}/api/v1${path}`);
     for (const [k, v] of Object.entries(params || {})) if (v != null) u.searchParams.set(k, String(v));
     const headers = {
-      Cookie: this.session,
-      'User-Agent': USER_AGENT,
       'X-IG-App-ID': WEB_APP_ID,
       'X-Requested-With': 'XMLHttpRequest',
       'X-ASBD-ID': '129477',
@@ -86,6 +87,10 @@ class InstagramClient {
       Origin: this.base,
       Accept: '*/*',
     };
+    if (!this.browser) {
+      headers.Cookie = this.session;
+      headers['User-Agent'] = USER_AGENT;
+    }
     if (this.cookies.csrftoken) headers['X-CSRFToken'] = this.cookies.csrftoken;
     let body;
     if (form) {
@@ -114,7 +119,10 @@ class InstagramClient {
       });
     }
     if (res.status === 429 || json.spam || /wait a few minutes|feedback_required|rate.?limit/i.test(msg)) {
-      throw new InstagramError(msg || 'Instagram istek limiti', { status: res.status, type: 'rate' });
+      throw new InstagramError(msg || 'Instagram çok fazla istek algıladı, birkaç dakika sonra tekrar denenecek.', {
+        status: res.status,
+        type: 'rate',
+      });
     }
     if (!res.ok || json.status === 'fail') {
       throw new InstagramError(msg || `Instagram isteği başarısız (HTTP ${res.status})`, { status: res.status });

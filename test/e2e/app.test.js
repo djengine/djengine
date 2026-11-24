@@ -61,36 +61,54 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
     await page.screenshot({ path: path.join(SHOTS, '01-ilk-acilis.png') });
   });
 
-  // "Instagram ile Giriş Yap"a basar, açılan Instagram giriş penceresini döndürür
-  const openLogin = async (selector = '[data-testid="login"]') => {
-    const [w] = await Promise.all([app.waitForEvent('window'), page.click(selector)]);
-    await w.waitForSelector('input[name="username"]');
+  const loginWith = async (username, password) => {
+    await page.fill('[data-testid="ig-username"]', username);
+    await page.fill('[data-testid="ig-password"]', password);
+    await page.click('[data-testid="login"]');
+  };
+  const visibleLoginWindow = async () => {
+    let w = null;
+    await waitFor(async () => {
+      for (const p of app.windows()) {
+        if (p === page || p.isClosed()) continue;
+        const vis = await app.evaluate(({ BrowserWindow }, url) => {
+          const bw = BrowserWindow.getAllWindows().find((x) => x.webContents.getURL() === url);
+          return !!bw && bw.isVisible();
+        }, p.url()).catch(() => false);
+        if (vis) w = p;
+      }
+      return !!w;
+    }, 10000);
     return w;
   };
 
-  await t.test('giriş penceresi kapatılırsa anlaşılır mesaj verilir, token alanı yoktur', async () => {
+  await t.test('e-posta yazılırsa kullanıcı adı istenir, token alanı yoktur', async () => {
     await page.click('[data-view="accounts"]');
     assert.equal(await page.locator('textarea, [data-testid="token-input"]').count(), 0);
-    assert.doesNotMatch(await page.locator('#view-accounts').textContent(), /token/i);
-    const w = await openLogin();
-    await w.fill('input[name="username"]', U1);
-    await w.fill('input[name="password"]', 'yanlis');
-    await w.click('button[type="submit"]');
+    assert.doesNotMatch(await page.locator('#view-accounts').textContent(), /token|e-posta/i);
+    await loginWith('dj@ornek.com', 'x');
+    await page.locator('#toast.err').waitFor();
+    assert.match(await page.locator('#toast').textContent(), /kullanıcı adı/i);
+    assert.equal(app.windows().length, 1, 'e-postayla giriş penceresi açılmamalı');
+  });
+
+  await t.test('yanlış şifrede Instagram penceresi gösterilir, kapatılınca anlaşılır mesaj verilir', async () => {
+    await loginWith(U1, 'yanlis');
+    const w = await visibleLoginWindow();
     await w.locator('#err').waitFor();
     await w.close();
     await page.locator('#toast.err').waitFor();
     assert.match(await page.locator('#toast').textContent(), /giriş tamamlanmadı/i);
   });
 
-  await t.test('iki hesap kullanıcı adı ve şifreyle bağlanır', async () => {
-    for (const [name, pass] of [[U1, 'dj-sifre'], [U2, 'gs-sifre']]) {
-      const w = await openLogin();
-      await w.fill('input[name="username"]', name);
-      await w.fill('input[name="password"]', pass);
-      await w.click('button[type="submit"]');
-      await page.locator(`[data-testid="account-${name}"]`).waitFor();
-      await waitFor(() => w.isClosed());
+  await t.test('iki hesap kullanıcı adı ve şifreyle, ek pencere görmeden bağlanır', async () => {
+    for (const [name, pass] of [[U1, 'dj-sifre'], ['@' + U2, 'gs-sifre']]) {
+      await loginWith(name, pass);
+      await page.locator(`[data-testid="account-${name.replace('@', '')}"]`).waitFor();
     }
+    const shown = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().filter((w) => w.isVisible()).length);
+    assert.equal(shown, 1, 'başarılı girişte Instagram penceresi görünmemeli');
+    assert.equal(await page.locator('[data-testid="ig-password"]').inputValue(), '');
     await page.screenshot({ path: path.join(SHOTS, '02-hesaplar.png') });
   });
 
@@ -174,11 +192,10 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
     await page.evaluate(() => window.api.checkNow());
     await page.click('[data-view="accounts"]');
     const btn = `[data-testid="relogin-${U2}"]`;
-    await page.locator(btn).waitFor();
-    const w = await openLogin(btn);
-    await w.fill('input[name="username"]', U2);
-    await w.fill('input[name="password"]', 'gs-sifre');
-    await w.click('button[type="submit"]');
+    await page.click(btn);
+    assert.equal(await page.locator('[data-testid="ig-username"]').inputValue(), U2);
+    await page.fill('[data-testid="ig-password"]', 'gs-sifre');
+    await page.click('[data-testid="login"]');
     await page.locator(btn).waitFor({ state: 'detached' });
     const s = await page.evaluate(() => window.api.state());
     assert.equal(s.accounts.length, 2);

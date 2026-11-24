@@ -112,33 +112,83 @@ function pushState() {
 }
 
 // ---- Instagram ile giriş ----
-// Instagram'ın kendi giriş sayfasını ayrı, geçici bir oturumda açar. Kullanıcı adı/şifre ve
-// varsa doğrulama kodu bu sayfada girilir; şifre uygulamaya hiç gelmez ve saklanmaz.
-// Giriş tamamlanınca oturum çerezleri alınır ve pencere kapanır.
+// Kullanıcı adı ve şifre uygulamadaki formdan alınır; Instagram'ın kendi giriş sayfası gizli,
+// geçici bir oturumda açılıp bu bilgilerle otomatik doldurulur. Şifre sadece bu işlem için
+// bellekte tutulur, hiçbir yere kaydedilmez. Instagram doğrulama kodu isterse veya şifre
+// yanlışsa giriş penceresi kullanıcıya gösterilir. Giriş tamamlanınca oturum çerezleri alınır.
+const LOGIN_SHOW_AFTER_MS = 12000;
+
+// Instagram'ın giriş formunu doldurup gönderen, sayfada çalışan betik
+function fillScript(username, password) {
+  return `(async (u, p) => {
+    const q = (s) => document.querySelector(s);
+    const USER = 'input[name="username"], input[name="email"], input[autocomplete="username"]';
+    const PASS = 'input[name="password"], input[name="pass"], input[type="password"]';
+    for (let i = 0; i < 75 && !(q(USER) && q(PASS)); i++) await new Promise((r) => setTimeout(r, 200));
+    const un = q(USER), pw = q(PASS);
+    if (!un || !pw) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    for (const [el, v] of [[un, u], [pw, p]]) {
+      el.focus();
+      setter.call(el, v);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    await new Promise((r) => setTimeout(r, 400));
+    const form = pw.form;
+    const btn = (form && form.querySelector('button[type="submit"], button:not([type])')) || q('button[type="submit"]');
+    if (btn) btn.click();
+    else if (form) form.requestSubmit();
+    return true;
+  })(${JSON.stringify(username)}, ${JSON.stringify(password)})`;
+}
+
 let loginWin = null;
-function loginWithInstagram() {
+function loginWithInstagram({ username, password }) {
   if (loginWin && !loginWin.isDestroyed()) {
+    loginWin.show();
     loginWin.focus();
-    return Promise.reject(new Error('Giriş penceresi zaten açık.'));
+    return Promise.reject(new Error('Giriş zaten sürüyor.'));
   }
   const base = (process.env.IG_WEB_BASE || 'https://www.instagram.com').replace(/\/$/, '');
+  const loginUrl = `${base}/accounts/login/`;
   const partition = `dmo-login-${Date.now()}`; // kalıcı değil: her giriş temiz başlar
   const ses = session.fromPartition(partition);
   ses.setUserAgent(USER_AGENT);
   return new Promise((resolve, reject) => {
     let done = false;
+    let filled = false;
     const w = (loginWin = new BrowserWindow({
       width: 480,
       height: 760,
+      show: false,
       title: 'Instagram ile Giriş',
       parent: win && !win.isDestroyed() ? win : undefined,
       backgroundColor: '#ffffff',
       webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true },
     }));
+    const reveal = () => {
+      if (!done && !w.isDestroyed() && !w.isVisible()) w.show();
+    };
     w.webContents.setWindowOpenHandler(({ url }) => {
       w.loadURL(url);
       return { action: 'deny' };
     });
+    w.webContents.on('did-finish-load', () => {
+      const onLogin = w.webContents.getURL().startsWith(loginUrl);
+      if (onLogin && !filled) {
+        filled = true;
+        w.webContents
+          .executeJavaScript(fillScript(username, password))
+          .then((ok) => !ok && reveal())
+          .catch(reveal);
+      } else if (filled) {
+        // Giriş sayfası tekrar açıldı (yanlış şifre) ya da doğrulama sayfasına geçildi:
+        // giriş birazdan tamamlanmazsa kullanıcıya göster.
+        setTimeout(reveal, 1500);
+      }
+    });
+    const showTimer = setTimeout(reveal, LOGIN_SHOW_AFTER_MS);
     const finish = async () => {
       if (done) return;
       const cookies = await ses.cookies.get({ url: base });
@@ -146,17 +196,19 @@ function loginWithInstagram() {
       if (!has('sessionid') || !has('ds_user_id')) return;
       done = true;
       clearInterval(iv);
+      clearTimeout(showTimer);
       resolve(cookies.map((c) => `${c.name}=${c.value}`).join('; '));
       w.destroy();
       ses.clearStorageData().catch(() => {});
     };
-    const iv = setInterval(() => finish().catch(() => {}), 600);
+    const iv = setInterval(() => finish().catch(() => {}), 500);
     w.on('closed', () => {
       clearInterval(iv);
+      clearTimeout(showTimer);
       loginWin = null;
-      if (!done) reject(new Error('Giriş tamamlanmadı (pencere kapatıldı).'));
+      if (!done) reject(new Error('Giriş tamamlanmadı. Kullanıcı adı ve şifrenizi kontrol edip tekrar deneyin.'));
     });
-    w.loadURL(`${base}/accounts/login/`).catch(() => {});
+    w.loadURL(loginUrl).catch(() => {});
   });
 }
 
@@ -173,8 +225,14 @@ function registerIpc() {
 
   handle('state', () => publicState());
 
-  handle('account:login', async () => {
-    const cookies = await loginWithInstagram();
+  handle('account:login', async (creds = {}) => {
+    const username = String(creds.username || '').trim().replace(/^@/, '');
+    const password = String(creds.password || '');
+    if (!username) throw new Error('Instagram kullanıcı adınızı yazın.');
+    if (username.includes('@')) throw new Error('E-posta değil, Instagram kullanıcı adınızı yazın (örn. dj_engine).');
+    if (!/^[A-Za-z0-9._]{1,30}$/.test(username)) throw new Error('Kullanıcı adı sadece harf, rakam, nokta ve alt çizgi içerebilir.');
+    if (!password) throw new Error('Şifrenizi yazın.');
+    const cookies = await loginWithInstagram({ username, password });
     const me = await new InstagramClient(cookies).me();
     if (!me.user_id || !me.username) throw new Error('Hesap bilgisi alınamadı, lütfen tekrar deneyin.');
     const now = new Date().toISOString();

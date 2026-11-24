@@ -144,7 +144,7 @@ h2 { font-size: 16px; margin: 0 0 12px; }
 label.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
 label.field > span:first-child { font-weight: 600; font-size: 13px; }
 .hint { color: var(--muted); font-size: 12px; font-weight: 400; }
-input[type=text], input[type=number], textarea, select {
+input[type=text], input[type=password], input[type=number], textarea, select {
   border: 1px solid var(--border); background: var(--panel-2); border-radius: 8px; padding: 8px 10px; width: 100%;
 }
 textarea { resize: vertical; min-height: 70px; }

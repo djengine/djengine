@@ -13,7 +13,7 @@
   - Uygulamanın kurulmasından önceki yorumlara mesaj gönderilmez.
   - Kendi yorumlarınıza cevap verilmez.
 - Uygulama menü çubuğunda (saatin yanında) yaşar; pencereyi kapatınca da çalışmaya devam eder.
-- Hesaplar **Instagram ile Giriş Yap** butonuyla, kullanıcı adı ve şifreyle bağlanır. Meta geliştirici hesabı veya token gerekmez. Şifre saklanmaz; oturum bilgisi macOS Anahtar Zinciri ile şifrelenerek saklanır.
+- Hesaplar Instagram **kullanıcı adı ve şifreyle** bağlanır. Meta geliştirici hesabı veya token gerekmez. Şifre saklanmaz; oturum bilgisi macOS Anahtar Zinciri ile şifrelenerek saklanır.
 
 > Otomasyon Mac açık ve uygulama çalışırken işler. Mac uykudan uyanınca, kapalıyken gelen son 7 günlük yorumlara cevap verilir.
 
@@ -29,11 +29,11 @@
 3. `dist/` klasöründeki `DM Otomasyon-1.0.0-*.dmg` dosyasını açın ve uygulamayı **Uygulamalar** klasörüne sürükleyin.
 
 ## Instagram bağlantısı
-1. Uygulamada **Hesaplar → Instagram ile Giriş Yap**'a basın.
-2. Açılan Instagram sayfasında kullanıcı adınızı ve şifrenizi (varsa doğrulama kodunu) girin. Giriş bitince pencere kendiliğinden kapanır.
+1. Uygulamada **Hesaplar** sayfasına Instagram **kullanıcı adınızı** (e-posta değil) ve şifrenizi yazıp **Giriş yap**'a basın.
+2. Uygulama Instagram'a arka planda giriş yapar. Instagram doğrulama kodu isterse veya şifre yanlışsa Instagram penceresi açılır; kodu orada girin.
 3. İkinci hesap için tekrarlayın.
 
-Instagram oturumu kapatırsa hesap **"Yeniden giriş gerekli"** olarak görünür; **Yeniden giriş yap**'a basmanız yeterli.
+Instagram oturumu kapatırsa hesap **"Yeniden giriş gerekli"** olarak görünür; **Yeniden giriş yap**'a basıp şifrenizi tekrar girmeniz yeterli.
 
 > **Risk:** Bu yöntem Instagram'ın web sitesinin kullandığı, belgelenmemiş servislerle çalışır; resmî otomasyon yolu değildir. Instagram bu servisleri değiştirebilir veya otomatik mesajları kurallarına aykırı sayıp hesabı kısıtlayabilir. Saatlik gönderim sınırını düşük tutun.
 

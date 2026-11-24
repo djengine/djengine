@@ -114,7 +114,7 @@ function accountCard(a, withActions = false) {
         <div class="muted small">${ruleCount} otomasyon · son kontrol ${timeAgo(a.lastPollAt)}</div>
         ${a.lastError ? `<div class="small" style="color:var(--err);margin-top:4px">${esc(a.lastError)}</div>` : ''}
       </div>
-      ${a.status === 'auth' ? `<button class="btn small primary" data-login="1" data-testid="relogin-${esc(a.username)}">Yeniden giriş yap</button>` : ''}
+      ${a.status === 'auth' ? `<button class="btn small primary" data-relogin="${esc(a.username)}" data-testid="relogin-${esc(a.username)}">Yeniden giriş yap</button>` : ''}
       ${withActions ? `<button class="btn small danger" data-remove-account="${esc(a.id)}">Kaldır</button>` : ''}
     </div>`;
 }
@@ -200,27 +200,49 @@ function renderRules() {
 function renderAccounts() {
   $('#view-accounts').innerHTML = `
     <h1>Hesaplar</h1>
-    <p class="lead">Instagram hesabınızla giriş yapın, o kadar. Birden fazla hesap ekleyebilirsiniz.</p>
+    <p class="lead">Instagram kullanıcı adınız ve şifrenizle giriş yapın. Birden fazla hesap ekleyebilirsiniz.</p>
     <div class="stack gap-below">${S.accounts.map((a) => accountCard(a, true)).join('')}</div>
-    <div class="card">
+    <form class="card" id="login-form" autocomplete="off">
       <h2>Hesap ekle</h2>
-      <p class="muted" style="margin-top:0">Instagram'ın giriş sayfası açılır. Kullanıcı adınızı ve şifrenizi orada girin; giriş bitince pencere kendiliğinden kapanır. Şifreniz bu uygulamada saklanmaz.</p>
-      <button class="btn primary" data-login="1" data-testid="login">Instagram ile Giriş Yap</button>
-    </div>`;
+      <label class="field"><span>Instagram kullanıcı adı</span>
+        <input type="text" id="ig-username" data-testid="ig-username" placeholder="örn. dj_engine" autocapitalize="off" spellcheck="false"></label>
+      <label class="field"><span>Şifre</span>
+        <input type="password" id="ig-password" data-testid="ig-password" placeholder="Instagram şifreniz"></label>
+      <p class="hint">Şifreniz sadece giriş için kullanılır, bu uygulamada saklanmaz. Instagram doğrulama kodu isterse Instagram penceresi açılır.</p>
+      <button class="btn primary" type="submit" id="login-btn" data-testid="login">Giriş yap</button>
+    </form>`;
+  $('#login-form').onsubmit = (e) => {
+    e.preventDefault();
+    login();
+  };
 }
 
-async function login(btn) {
-  const label = btn.textContent;
+async function login() {
+  const btn = $('#login-btn');
+  const user = $('#ig-username');
+  const pass = $('#ig-password');
   btn.disabled = true;
-  btn.textContent = 'Giriş penceresi açık…';
+  btn.textContent = 'Giriş yapılıyor…';
   try {
-    const r = await run(() => api.login());
+    const r = await run(() => api.login(user.value, pass.value));
     toast(`@${r.username} bağlandı`);
+    render();
   } catch (_) {
   } finally {
-    btn.disabled = false;
-    btn.textContent = label;
+    // Ekran yeniden çizilmiş olabilir; güncel öğelerle çalış
+    if ($('#ig-password')) $('#ig-password').value = '';
+    if ($('#login-btn')) {
+      $('#login-btn').disabled = false;
+      $('#login-btn').textContent = 'Giriş yap';
+    }
   }
+}
+
+// "Yeniden giriş yap": kullanıcı adını doldurur, şifre alanına odaklanır
+function relogin(username) {
+  go('accounts');
+  $('#ig-username').value = username;
+  $('#ig-password').focus();
 }
 
 function renderActivity() {
@@ -268,7 +290,7 @@ function renderHelp() {
     <h1>Kurulum Rehberi</h1>
     <p class="lead">İki dakikada hazır.</p>
     <div class="card"><ol class="steps">
-      <li><b>Giriş yapın</b><a class="link" data-go="accounts">Hesaplar</a> sayfasında <i>"Instagram ile Giriş Yap"</i>a basın, Instagram kullanıcı adınızı ve şifrenizi girin. İkinci hesap için tekrarlayın.</li>
+      <li><b>Giriş yapın</b><a class="link" data-go="accounts">Hesaplar</a> sayfasında Instagram kullanıcı adınızı (e-posta değil) ve şifrenizi yazıp <i>"Giriş yap"</i>a basın. İkinci hesap için tekrarlayın.</li>
       <li><b>Otomasyon oluşturun</b><a class="link" data-go="rules">Otomasyonlar</a> sayfasında örneğin: gönderiye <code>SET</code> yazan kişiye linki DM'den gönder.</li>
       <li><b>Test modunda deneyin</b>Başka bir hesaptan gönderinize yorum yazın ve Aktivite sayfasında "Test" kaydını görün. Her şey doğruysa test modunu kapatın.</li>
     </ol></div>
@@ -276,7 +298,7 @@ function renderHelp() {
       <h2>Bilmeniz gerekenler</h2>
       <ul class="muted" style="margin:0;padding-left:18px">
         <li><b>Risk:</b> Bu giriş yöntemi Instagram'ın resmî otomasyon yolu değildir. Instagram otomatik mesajları kurallarına aykırı sayıp hesabı geçici olarak kısıtlayabilir. Saatlik gönderim sınırını düşük tutun (Ayarlar).</li>
-        <li>Instagram bazen "Bu siz misiniz?" diye doğrulama isteyebilir. O zaman hesap "Yeniden giriş gerekli" olur; <i>"Yeniden giriş yap"</i>a basmanız yeterli.</li>
+        <li>Instagram bazen "Bu siz misiniz?" diye doğrulama isteyebilir. O zaman hesap "Yeniden giriş gerekli" olur; <i>"Yeniden giriş yap"</i>a basıp şifrenizi tekrar girmeniz yeterli.</li>
         <li>Otomasyon bu Mac açık ve uygulama çalışırken işler. Mac uykudaysa, uyandığında son 7 gün içindeki yorumlara cevap verilir.</li>
         <li>Mesajlarda <code>{username}</code> yazarsanız kişinin kullanıcı adıyla değiştirilir. Birden fazla alternatif için cevapları ayrı satırda <code>---</code> ile ayırın, rastgele biri seçilir.</li>
       </ul>
@@ -429,10 +451,10 @@ function go(v) {
 }
 
 document.addEventListener('click', async (e) => {
-  const t = e.target.closest('[data-view],[data-go],[data-ext],[data-filter],[data-edit-rule],[data-remove-rule],[data-remove-account],[data-login]');
+  const t = e.target.closest('[data-view],[data-go],[data-ext],[data-filter],[data-edit-rule],[data-remove-rule],[data-remove-account],[data-relogin]');
   if (!t) return;
   const ds = t.dataset;
-  if (ds.login) login(t);
+  if (ds.relogin) relogin(ds.relogin);
   else if (ds.view) go(ds.view);
   else if (ds.go) go(ds.go);
   else if (ds.ext) run(() => api.openExternal(ds.ext)).catch(() => {});

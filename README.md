@@ -13,7 +13,7 @@
   - Uygulamanın kurulmasından önceki yorumlara mesaj gönderilmez.
   - Kendi yorumlarınıza cevap verilmez.
 - Uygulama menü çubuğunda (saatin yanında) yaşar; pencereyi kapatınca da çalışmaya devam eder.
-- Instagram token'ları macOS Anahtar Zinciri ile şifrelenerek saklanır ve 60 günde bir otomatik yenilenir.
+- Hesaplar **Instagram ile Giriş Yap** butonuyla, kullanıcı adı ve şifreyle bağlanır. Meta geliştirici hesabı veya token gerekmez. Şifre saklanmaz; oturum bilgisi macOS Anahtar Zinciri ile şifrelenerek saklanır.
 
 > Otomasyon Mac açık ve uygulama çalışırken işler. Mac uykudan uyanınca, kapalıyken gelen son 7 günlük yorumlara cevap verilir.
 
@@ -29,14 +29,13 @@
 3. `dist/` klasöründeki `DM Otomasyon-1.0.0-*.dmg` dosyasını açın ve uygulamayı **Uygulamalar** klasörüne sürükleyin.
 
 ## Instagram bağlantısı
-Uygulamadaki **Kurulum Rehberi** sayfası adım adım anlatıyor. Kısaca:
-1. Her iki Instagram hesabı Profesyonel (İşletme veya İçerik Üreticisi) olmalı.
-2. developers.facebook.com'da bir uygulama oluşturun. Kullanım durumu: "Instagram ile mesajları ve içeriği yönetin".
-3. Hesaplarınızı **Instagram Test Kullanıcısı** olarak ekleyin ve daveti Instagram'dan kabul edin.
-4. "API kurulumu (Instagram girişi ile)" bölümünden her hesap için token oluşturun.
-5. Token'ı uygulamadaki **Hesaplar** sayfasına yapıştırın.
+1. Uygulamada **Hesaplar → Instagram ile Giriş Yap**'a basın.
+2. Açılan Instagram sayfasında kullanıcı adınızı ve şifrenizi (varsa doğrulama kodunu) girin. Giriş bitince pencere kendiliğinden kapanır.
+3. İkinci hesap için tekrarlayın.
 
-Uygulama sadece sizin hesaplarınızda çalışacağı için Meta incelemesine (App Review) gerek yoktur.
+Instagram oturumu kapatırsa hesap **"Yeniden giriş gerekli"** olarak görünür; **Yeniden giriş yap**'a basmanız yeterli.
+
+> **Risk:** Bu yöntem Instagram'ın web sitesinin kullandığı, belgelenmemiş servislerle çalışır; resmî otomasyon yolu değildir. Instagram bu servisleri değiştirebilir veya otomatik mesajları kurallarına aykırı sayıp hesabı kısıtlayabilir. Saatlik gönderim sınırını düşük tutun.
 
 ## Geliştirme
 ```bash

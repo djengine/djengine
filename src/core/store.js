@@ -49,7 +49,7 @@ class Store {
           } catch (e) {
             acc.token = null;
             acc.status = 'error';
-            acc.lastError = 'Token çözülemedi, lütfen hesabı yeniden bağlayın.';
+            acc.lastError = 'Oturum bilgisi çözülemedi, lütfen hesaba yeniden giriş yapın.';
           }
           delete acc.tokenEnc;
         }

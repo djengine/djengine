@@ -8,7 +8,6 @@ const DAY = 24 * HOUR;
 const PRIVATE_REPLY_WINDOW = 7 * DAY; // Instagram: yoruma özel DM en fazla 7 gün içinde
 const MESSAGING_WINDOW = DAY; // Instagram: kişi son yazdıktan sonra 24 saat içinde cevap
 const RATE_LIMIT_BACKOFF = 15 * 60 * 1000;
-const TOKEN_REFRESH_EVERY = 5 * DAY;
 
 class RetryLater extends Error {}
 
@@ -51,7 +50,6 @@ class Engine {
   async pollAccount(acc) {
     const client = this.clientFactory(acc.token);
     try {
-      await this.maybeRefreshToken(acc, client);
       const commentRules = this.rulesFor(acc, 'comment');
       const dmRules = this.rulesFor(acc, 'dm');
       if (commentRules.length) await this.pollComments(acc, client, commentRules);
@@ -74,7 +72,7 @@ class Engine {
       acc.lastError = 'İnternet bağlantısı yok, bağlantı gelince devam edilecek.';
     } else if (e instanceof InstagramError && e.isAuth) {
       acc.status = 'auth';
-      acc.lastError = `Token geçersiz veya süresi dolmuş: ${e.message}`;
+      acc.lastError = e.message;
     } else if (e instanceof InstagramError && e.isRateLimit) {
       acc.status = 'limit';
       acc.backoffUntil = new Date(this.now() + RATE_LIMIT_BACKOFF).toISOString();
@@ -86,24 +84,6 @@ class Engine {
     // Aynı hata her turda tekrar tekrar kaydedilmesin
     if (acc.lastError === previous) return;
     this.store.addLog({ type: 'error', accountId: acc.id, account: acc.username, message: acc.lastError });
-  }
-
-  async maybeRefreshToken(acc, client) {
-    const last = Date.parse(acc.tokenRefreshedAt || acc.connectedAt || 0);
-    if (this.now() - last < TOKEN_REFRESH_EVERY) return;
-    try {
-      const r = await client.refreshToken();
-      if (r.access_token) {
-        acc.token = r.access_token;
-        client.token = r.access_token;
-        acc.tokenRefreshedAt = new Date(this.now()).toISOString();
-        if (r.expires_in) acc.tokenExpiresAt = new Date(this.now() + r.expires_in * 1000).toISOString();
-      }
-    } catch (e) {
-      if (e instanceof InstagramError && e.isAuth) throw e;
-      // Yenileme başarısızsa bir gün sonra tekrar dene; mevcut token hâlâ çalışıyor olabilir.
-      acc.tokenRefreshedAt = new Date(this.now() - TOKEN_REFRESH_EVERY + DAY).toISOString();
-    }
   }
 
   ruleAppliesToMedia(rule, mediaId) {
@@ -152,6 +132,7 @@ class Engine {
           await this.act(acc, client, rule, {
             kind: 'comment',
             commentId: c.id,
+            mediaId: media.id,
             userId: fromId || `u:${username}`,
             username,
             text: c.text,
@@ -241,10 +222,10 @@ class Engine {
 
     try {
       if (dmText) {
-        if (target.kind === 'comment') await client.privateReply(target.commentId, dmText);
+        if (target.kind === 'comment') await client.privateReply(target.commentId, dmText, target);
         else await client.sendMessage(target.userId, dmText);
       }
-      if (publicText) await client.replyToComment(target.commentId, publicText);
+      if (publicText) await client.replyToComment(target.commentId, publicText, target);
     } catch (e) {
       // Kimlik veya limit hatasında tüm turu durdur; yorum "görülmedi" kalır ve sonra tekrar denenir.
       if (e instanceof InstagramError && (e.isAuth || e.isRateLimit)) throw e;

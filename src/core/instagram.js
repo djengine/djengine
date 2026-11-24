@@ -1,139 +1,220 @@
 'use strict';
 
-// Instagram API (Instagram Girişi ile) istemcisi.
-// Belgeler: https://developers.facebook.com/docs/instagram-platform
-const DEFAULT_BASE = 'https://graph.instagram.com';
-const API_VERSION = 'v23.0';
+// Instagram istemcisi — instagram.com'a normal kullanıcı girişiyle açılan oturumu kullanır.
+// Meta geliştirici uygulaması veya token gerekmez; uygulama içindeki giriş penceresinden
+// alınan oturum çerezleriyle Instagram web sitesinin kullandığı uç noktalara istek atar.
+//
+// DİKKAT: Bu uç noktalar resmî/belgelenmiş değildir; Instagram değiştirebilir. Otomatik
+// mesajlaşma Instagram kullanım koşullarına aykırı sayılabilir ve hesap kısıtlanabilir.
+const DEFAULT_BASE = 'https://www.instagram.com';
+const WEB_APP_ID = '936619743392459';
+const USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
 
 class InstagramError extends Error {
-  constructor(message, { code, subcode, status, type } = {}) {
+  constructor(message, { status, type } = {}) {
     super(message);
     this.name = 'InstagramError';
-    this.code = code;
-    this.subcode = subcode;
     this.status = status;
     this.type = type;
   }
 
   get isAuth() {
-    return this.code === 190 || this.status === 401;
+    return this.type === 'auth' || this.status === 401;
   }
 
   get isRateLimit() {
-    return [4, 17, 32, 613].includes(this.code) || this.status === 429;
+    return this.type === 'rate' || this.status === 429;
   }
 }
 
+// 16+ haneli sayılar JavaScript'te hassasiyet kaybeder (Instagram id'leri böyle); metne çevir.
+function parseJson(text) {
+  return JSON.parse(text.replace(/([:[,]\s*)(-?\d{16,})(?=\s*[,}\]])/g, '$1"$2"'));
+}
+
+const iso = (seconds) => (seconds ? new Date(Number(seconds) * 1000).toISOString() : null);
+const isoMicro = (us) => (us ? new Date(Math.floor(Number(us) / 1000)).toISOString() : null);
+
+function parseCookies(str) {
+  const out = {};
+  for (const part of String(str || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+  }
+  return out;
+}
+
+function normalizeMedia(m) {
+  const pk = String(m.pk || String(m.id || '').split('_')[0]);
+  const img = (m.image_versions2 && m.image_versions2.candidates && m.image_versions2.candidates[0]) || null;
+  const firstCarousel = (m.carousel_media && m.carousel_media[0]) || null;
+  const carouselImg =
+    firstCarousel && firstCarousel.image_versions2 && firstCarousel.image_versions2.candidates && firstCarousel.image_versions2.candidates[0];
+  return {
+    id: pk,
+    caption: (m.caption && m.caption.text) || '',
+    permalink: m.code ? `https://www.instagram.com/p/${m.code}/` : null,
+    timestamp: iso(m.taken_at),
+    media_type: m.media_type,
+    thumbnail_url: (img && img.url) || (carouselImg && carouselImg.url) || null,
+    comments_count: m.comment_count != null ? Number(m.comment_count) : null,
+  };
+}
+
 class InstagramClient {
-  constructor(token, { baseUrl, fetchImpl } = {}) {
-    this.token = token;
-    this.base = (baseUrl || process.env.IG_API_BASE || DEFAULT_BASE).replace(/\/$/, '');
+  // `session`: giriş penceresinden alınan çerezler ("sessionid=...; csrftoken=...; ds_user_id=...").
+  constructor(session, { baseUrl, fetchImpl } = {}) {
+    this.session = session;
+    this.cookies = parseCookies(session);
+    this.userId = this.cookies.ds_user_id || null;
+    this.base = (baseUrl || process.env.IG_WEB_BASE || DEFAULT_BASE).replace(/\/$/, '');
     this.fetch = fetchImpl || globalThis.fetch;
+    this.threads = new Map(); // son gelen kutusu okumasındaki konuşmalar
   }
 
-  url(path, params = {}) {
-    const isAbsolute = /^https?:/.test(path);
-    const u = new URL(isAbsolute ? path : `${this.base}/${API_VERSION}${path}`);
-    for (const [k, v] of Object.entries(params)) if (v != null) u.searchParams.set(k, String(v));
-    return u;
-  }
-
-  async request(method, path, { params, body } = {}) {
-    const u = this.url(path, params);
-    const headers = { Authorization: `Bearer ${this.token}` };
-    let payload;
-    if (body) {
-      headers['Content-Type'] = 'application/json';
-      payload = JSON.stringify(body);
+  async request(method, path, { params, form } = {}) {
+    const u = new URL(`${this.base}/api/v1${path}`);
+    for (const [k, v] of Object.entries(params || {})) if (v != null) u.searchParams.set(k, String(v));
+    const headers = {
+      Cookie: this.session,
+      'User-Agent': USER_AGENT,
+      'X-IG-App-ID': WEB_APP_ID,
+      'X-Requested-With': 'XMLHttpRequest',
+      'X-ASBD-ID': '129477',
+      Referer: `${this.base}/`,
+      Origin: this.base,
+      Accept: '*/*',
+    };
+    if (this.cookies.csrftoken) headers['X-CSRFToken'] = this.cookies.csrftoken;
+    let body;
+    if (form) {
+      headers['Content-Type'] = 'application/x-www-form-urlencoded';
+      body = new URLSearchParams(form).toString();
     }
     let res;
     try {
-      res = await this.fetch(u, { method, headers, body: payload, signal: AbortSignal.timeout(20000) });
+      res = await this.fetch(u, { method, headers, body, redirect: 'manual', signal: AbortSignal.timeout(20000) });
     } catch (e) {
       throw new InstagramError(`Instagram'a bağlanılamadı: ${e.message}`, { type: 'network' });
     }
+    // Oturum düşünce Instagram giriş sayfasına yönlendirir
+    if (res.status >= 300 && res.status < 400) {
+      throw new InstagramError('Instagram oturumu kapanmış. Hesaba yeniden giriş yapın.', { status: res.status, type: 'auth' });
+    }
     let json = {};
     try {
-      json = await res.json();
+      json = parseJson(await res.text());
     } catch (_) {}
-    if (!res.ok || json.error) {
-      const err = json.error || {};
-      throw new InstagramError(err.error_user_msg || err.message || `HTTP ${res.status}`, {
-        code: err.code,
-        subcode: err.error_subcode,
+    const msg = String(json.message || '');
+    if (json.require_login || /login_required|checkpoint_required|challenge_required/.test(msg) || res.status === 401) {
+      throw new InstagramError('Instagram oturumu kapanmış veya doğrulama istiyor. Hesaba yeniden giriş yapın.', {
         status: res.status,
-        type: err.type,
+        type: 'auth',
       });
+    }
+    if (res.status === 429 || json.spam || /wait a few minutes|feedback_required|rate.?limit/i.test(msg)) {
+      throw new InstagramError(msg || 'Instagram istek limiti', { status: res.status, type: 'rate' });
+    }
+    if (!res.ok || json.status === 'fail') {
+      throw new InstagramError(msg || `Instagram isteği başarısız (HTTP ${res.status})`, { status: res.status });
     }
     return json;
   }
 
-  me() {
-    return this.request('GET', '/me', {
-      params: { fields: 'user_id,username,name,profile_picture_url,account_type' },
-    });
+  async me() {
+    if (!this.userId) throw new InstagramError('Instagram girişi tamamlanmadı.', { type: 'auth' });
+    const r = await this.request('GET', `/users/${this.userId}/info/`);
+    const u = r.user || {};
+    return {
+      user_id: String(u.pk || u.pk_id || this.userId),
+      username: u.username,
+      name: u.full_name || '',
+      profile_picture_url: u.profile_pic_url || '',
+      account_type: u.is_business ? 'BUSINESS' : '',
+    };
   }
 
   async recentMedia(limit = 10) {
-    const r = await this.request('GET', '/me/media', {
-      params: {
-        fields: 'id,caption,permalink,timestamp,media_type,media_url,thumbnail_url,comments_count',
-        limit,
-      },
-    });
-    return r.data || [];
+    const r = await this.request('GET', `/feed/user/${this.userId}/`, { params: { count: limit } });
+    return (r.items || []).slice(0, limit).map(normalizeMedia);
   }
 
-  media(mediaId) {
-    return this.request('GET', `/${mediaId}`, {
-      params: { fields: 'id,caption,permalink,timestamp,media_type,media_url,thumbnail_url,comments_count' },
-    });
+  async media(mediaId) {
+    const r = await this.request('GET', `/media/${mediaId}/info/`);
+    if (!r.items || !r.items[0]) throw new InstagramError('Gönderi bulunamadı.');
+    return normalizeMedia(r.items[0]);
   }
 
-  async comments(mediaId, limit = 50) {
-    const r = await this.request('GET', `/${mediaId}/comments`, {
-      params: { fields: 'id,text,timestamp,username,from', limit },
+  async comments(mediaId) {
+    const r = await this.request('GET', `/media/${mediaId}/comments/`, {
+      params: { can_support_threading: 'true', permalink_enabled: 'false' },
     });
-    return r.data || [];
+    return (r.comments || []).map((c) => ({
+      id: String(c.pk),
+      text: c.text || '',
+      timestamp: iso(c.created_at_utc || c.created_at),
+      username: (c.user && c.user.username) || '',
+      from: { id: String((c.user && (c.user.pk || c.user.pk_id)) || ''), username: (c.user && c.user.username) || '' },
+    }));
   }
 
-  // Yoruma özel DM ("private reply"). Yorum başına bir kez, 7 gün içinde gönderilebilir.
-  privateReply(commentId, text) {
-    return this.request('POST', '/me/messages', {
-      body: { recipient: { comment_id: commentId }, message: { text } },
-    });
+  // Yorum yapan kişiye DM gönderir.
+  privateReply(_commentId, text, target = {}) {
+    return this.sendMessage(target.userId, text);
   }
 
-  replyToComment(commentId, text) {
-    return this.request('POST', `/${commentId}/replies`, { params: { message: text } });
+  replyToComment(commentId, text, target = {}) {
+    return this.request('POST', `/web/comments/${target.mediaId}/add/`, {
+      form: { comment_text: text, replied_to_comment_id: commentId },
+    });
   }
 
   async conversations(limit = 20) {
-    const r = await this.request('GET', '/me/conversations', {
-      params: { platform: 'instagram', fields: 'id,updated_time', limit },
+    const r = await this.request('GET', '/direct_v2/inbox/', {
+      params: { persistentBadging: 'true', folder: '', limit, thread_message_limit: 10 },
     });
-    return r.data || [];
+    const threads = (r.inbox && r.inbox.threads) || [];
+    this.threads.clear();
+    return threads.map((t) => {
+      const id = String(t.thread_id);
+      this.threads.set(id, t);
+      return { id, updated_time: isoMicro(t.last_activity_at) };
+    });
   }
 
   async conversationMessages(conversationId, limit = 10) {
-    const r = await this.request('GET', `/${conversationId}`, {
-      params: { fields: `messages.limit(${limit}){id,created_time,from,to,message}` },
+    let t = this.threads.get(conversationId);
+    if (!t) {
+      const r = await this.request('GET', `/direct_v2/threads/${conversationId}/`, { params: { limit } });
+      t = r.thread || {};
+    }
+    const users = new Map((t.users || []).map((u) => [String(u.pk || u.pk_id), u.username]));
+    return (t.items || []).slice(0, limit).map((it) => {
+      const from = String(it.user_id);
+      return {
+        id: String(it.item_id),
+        created_time: isoMicro(it.timestamp),
+        from: { id: from, username: users.get(from) || '' },
+        message: it.item_type === 'text' ? it.text || '' : '',
+      };
     });
-    return (r.messages && r.messages.data) || [];
   }
 
   sendMessage(recipientId, text) {
-    return this.request('POST', '/me/messages', {
-      body: { recipient: { id: recipientId }, message: { text } },
-    });
-  }
-
-  // Uzun süreli token'ı 60 gün daha uzatır (token en az 24 saatlik olmalı).
-  refreshToken() {
-    return this.request('GET', `${this.base}/refresh_access_token`, {
-      params: { grant_type: 'ig_refresh_token', access_token: this.token },
+    if (!recipientId || String(recipientId).startsWith('u:')) throw new InstagramError('Alıcı bulunamadı.');
+    const ctx = `${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    return this.request('POST', '/direct_v2/threads/broadcast/text/', {
+      form: {
+        recipient_users: JSON.stringify([[String(recipientId)]]),
+        action: 'send_item',
+        client_context: ctx,
+        offline_threading_id: ctx,
+        mutation_token: ctx,
+        text,
+      },
     });
   }
 }
 
-module.exports = { InstagramClient, InstagramError, API_VERSION };
+module.exports = { InstagramClient, InstagramError, parseCookies, parseJson, USER_AGENT };

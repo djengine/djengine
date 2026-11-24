@@ -11,15 +11,15 @@ const { createFakeInstagram } = require('../fake-instagram');
 
 const ROOT = path.join(__dirname, '..', '..');
 const SHOTS = process.env.DMO_SHOTS || path.join(os.tmpdir(), 'dmo-shots');
-const TOKEN1 = 'IGAAtest-dj-engine-0123456789abcdef';
-const TOKEN2 = 'IGAAtest-gsridercyprus-0123456789abcdef';
+const U1 = 'dj_engine';
+const U2 = 'gsridercyprus';
 
 function launch(userData, fakeUrl) {
   const args = [ROOT];
   if (process.platform === 'linux') args.unshift('--no-sandbox');
   return electron.launch({
     args,
-    env: { ...process.env, IG_API_BASE: fakeUrl, DMO_USER_DATA: userData },
+    env: { ...process.env, IG_WEB_BASE: fakeUrl, DMO_USER_DATA: userData },
     executablePath: process.env.DMO_APP_EXECUTABLE || require('electron'),
   });
 }
@@ -37,10 +37,10 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
   fs.mkdirSync(SHOTS, { recursive: true });
   const fake = createFakeInstagram();
   await fake.listen();
-  fake.addAccount(TOKEN1, 'dj_engine');
-  fake.addAccount(TOKEN2, 'gsridercyprus');
-  const post = fake.addMedia(TOKEN1, 'Yeni set yayında 🎧');
-  fake.addMedia(TOKEN1, 'Cuma gecesi');
+  fake.addAccount(U1, 'dj-sifre');
+  fake.addAccount(U2, 'gs-sifre');
+  const post = fake.addMedia(U1, 'Yeni set yayında 🎧');
+  fake.addMedia(U1, 'Cuma gecesi');
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'dmo-e2e-'));
 
   let app = null;
@@ -61,19 +61,35 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
     await page.screenshot({ path: path.join(SHOTS, '01-ilk-acilis.png') });
   });
 
-  await t.test('hatalı token anlaşılır hata verir', async () => {
+  // "Instagram ile Giriş Yap"a basar, açılan Instagram giriş penceresini döndürür
+  const openLogin = async (selector = '[data-testid="login"]') => {
+    const [w] = await Promise.all([app.waitForEvent('window'), page.click(selector)]);
+    await w.waitForSelector('input[name="username"]');
+    return w;
+  };
+
+  await t.test('giriş penceresi kapatılırsa anlaşılır mesaj verilir, token alanı yoktur', async () => {
     await page.click('[data-view="accounts"]');
-    await page.fill('[data-testid="token-input"]', 'IGAA-yanlis-token-00000000000');
-    await page.click('[data-testid="connect"]');
+    assert.equal(await page.locator('textarea, [data-testid="token-input"]').count(), 0);
+    assert.doesNotMatch(await page.locator('#view-accounts').textContent(), /token/i);
+    const w = await openLogin();
+    await w.fill('input[name="username"]', U1);
+    await w.fill('input[name="password"]', 'yanlis');
+    await w.click('button[type="submit"]');
+    await w.locator('#err').waitFor();
+    await w.close();
     await page.locator('#toast.err').waitFor();
-    assert.match(await page.locator('#toast').textContent(), /token/i);
+    assert.match(await page.locator('#toast').textContent(), /giriş tamamlanmadı/i);
   });
 
-  await t.test('iki hesap bağlanır', async () => {
-    for (const [tok, name] of [[TOKEN1, 'dj_engine'], [TOKEN2, 'gsridercyprus']]) {
-      await page.fill('[data-testid="token-input"]', tok);
-      await page.click('[data-testid="connect"]');
+  await t.test('iki hesap kullanıcı adı ve şifreyle bağlanır', async () => {
+    for (const [name, pass] of [[U1, 'dj-sifre'], [U2, 'gs-sifre']]) {
+      const w = await openLogin();
+      await w.fill('input[name="username"]', name);
+      await w.fill('input[name="password"]', pass);
+      await w.click('button[type="submit"]');
       await page.locator(`[data-testid="account-${name}"]`).waitFor();
+      await waitFor(() => w.isClosed());
     }
     await page.screenshot({ path: path.join(SHOTS, '02-hesaplar.png') });
   });
@@ -114,7 +130,7 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
   });
 
   await t.test('test modunda mesaj gönderilmez, kaydı tutulur', async () => {
-    fake.addComment(TOKEN1, post.id, { username: 'dinleyici1', text: 'SET linki lütfen' });
+    fake.addComment(U1, post.id, { username: 'dinleyici1', text: 'SET linki lütfen' });
     await page.click('[data-view="overview"]');
     await page.click('[data-testid="check-now"]');
     await page.click('[data-view="activity"]');
@@ -125,15 +141,15 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
   await t.test('test modu kapatılınca gerçek gönderim yapılır', async () => {
     await page.click('[data-testid="dry-off"]');
     await waitFor(async () => !(await page.locator('#dry-banner').isVisible()));
-    fake.addComment(TOKEN1, post.id, { username: 'dinleyici2', text: 'link atar mısın' });
-    fake.addComment(TOKEN1, post.id, { username: 'dinleyici3', text: 'süper olmuş' });
-    fake.addMessage(TOKEN2, { username: 'turist', text: 'Motor kiralama fiyatı nedir?' });
+    fake.addComment(U1, post.id, { username: 'dinleyici2', text: 'link atar mısın' });
+    fake.addComment(U1, post.id, { username: 'dinleyici3', text: 'süper olmuş' });
+    fake.addMessage(U2, { username: 'turist', text: 'Motor kiralama fiyatı nedir?' });
     await page.click('[data-view="overview"]');
     await page.click('[data-testid="check-now"]');
     await waitFor(() => fake.state.sent.length >= 3);
     const kinds = fake.state.sent.map((s) => `${s.kind}:${s.to || ''}`).sort();
-    assert.deepEqual(kinds, ['dm:u-turist', 'private_reply:dinleyici2', 'public_reply:']);
-    const pr = fake.state.sent.find((s) => s.kind === 'private_reply');
+    assert.deepEqual(kinds, ['dm:u-dinleyici2', 'dm:u-turist', 'public_reply:']);
+    const pr = fake.state.sent.find((s) => s.to === 'u-dinleyici2');
     assert.equal(pr.text, 'Selam @dinleyici2! Set linki: https://example.com/set');
     await waitFor(async () => (await page.locator('[data-testid="stat-sent"]').textContent()) === '2');
     await page.screenshot({ path: path.join(SHOTS, '05-genel-bakis.png') });
@@ -148,9 +164,25 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
       const s = await page.evaluate(() => window.api.state());
       return s.rules.find((r) => r.name === 'Set linki').active === false;
     });
-    fake.addComment(TOKEN1, post.id, { username: 'dinleyici4', text: 'set' });
+    fake.addComment(U1, post.id, { username: 'dinleyici4', text: 'set' });
     await page.evaluate(() => window.api.checkNow());
     assert.equal(fake.state.sent.length, 3);
+  });
+
+  await t.test('oturum kapanınca "Yeniden giriş yap" ile tek tıkla düzelir', async () => {
+    fake.expireSession(U2);
+    await page.evaluate(() => window.api.checkNow());
+    await page.click('[data-view="accounts"]');
+    const btn = `[data-testid="relogin-${U2}"]`;
+    await page.locator(btn).waitFor();
+    const w = await openLogin(btn);
+    await w.fill('input[name="username"]', U2);
+    await w.fill('input[name="password"]', 'gs-sifre');
+    await w.click('button[type="submit"]');
+    await page.locator(btn).waitFor({ state: 'detached' });
+    const s = await page.evaluate(() => window.api.state());
+    assert.equal(s.accounts.length, 2);
+    assert.equal(s.accounts.find((a) => a.username === U2).status, 'ok');
   });
 
   await t.test('ayarlar ve rehber sayfaları açılır', async () => {
@@ -170,13 +202,13 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
     assert.equal(visible, false);
   });
 
-  await t.test('yeniden açılınca veriler korunur, token düz metin olarak saklanmaz', async () => {
+  await t.test('yeniden açılınca veriler korunur, oturum bilgisi düz metin olarak saklanmaz', async () => {
     await app.evaluate(({ app: a }) => a.quit());
     await waitFor(async () => {
       try { return !app.process() || app.process().exitCode !== null; } catch (_) { return true; }
     }, 10000).catch(() => {});
     const raw = fs.readFileSync(path.join(userData, 'data.json'), 'utf8');
-    assert.ok(!raw.includes(TOKEN1) || process.platform === 'linux', 'Mac\'te token şifreli olmalı');
+    assert.ok(!raw.includes('sessionid=') || process.platform === 'linux', 'Mac\'te oturum bilgisi şifreli olmalı');
     app = await launch(userData, fake.url);
     const p2 = await app.firstWindow();
     const s = await p2.evaluate(() => window.api.state());

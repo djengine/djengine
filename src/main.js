@@ -1,10 +1,10 @@
 'use strict';
 
 const path = require('path');
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, powerSaveBlocker, safeStorage, shell, Notification } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, powerSaveBlocker, safeStorage, shell, Notification, session } = require('electron');
 const { Store } = require('./core/store');
 const { Engine } = require('./core/engine');
-const { InstagramClient } = require('./core/instagram');
+const { InstagramClient, USER_AGENT } = require('./core/instagram');
 
 if (process.env.DMO_USER_DATA) app.setPath('userData', process.env.DMO_USER_DATA);
 
@@ -22,7 +22,7 @@ let nextTickAt = null;
 let blockerId = null;
 let quitting = false;
 
-// ---- Token şifreleme (macOS'ta Anahtar Zinciri) ----
+// ---- Oturum şifreleme (macOS'ta Anahtar Zinciri) ----
 function encrypt(s) {
   if (safeStorage.isEncryptionAvailable()) return `enc:${safeStorage.encryptString(s).toString('base64')}`;
   return `plain:${s}`;
@@ -111,6 +111,55 @@ function pushState() {
   });
 }
 
+// ---- Instagram ile giriş ----
+// Instagram'ın kendi giriş sayfasını ayrı, geçici bir oturumda açar. Kullanıcı adı/şifre ve
+// varsa doğrulama kodu bu sayfada girilir; şifre uygulamaya hiç gelmez ve saklanmaz.
+// Giriş tamamlanınca oturum çerezleri alınır ve pencere kapanır.
+let loginWin = null;
+function loginWithInstagram() {
+  if (loginWin && !loginWin.isDestroyed()) {
+    loginWin.focus();
+    return Promise.reject(new Error('Giriş penceresi zaten açık.'));
+  }
+  const base = (process.env.IG_WEB_BASE || 'https://www.instagram.com').replace(/\/$/, '');
+  const partition = `dmo-login-${Date.now()}`; // kalıcı değil: her giriş temiz başlar
+  const ses = session.fromPartition(partition);
+  ses.setUserAgent(USER_AGENT);
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const w = (loginWin = new BrowserWindow({
+      width: 480,
+      height: 760,
+      title: 'Instagram ile Giriş',
+      parent: win && !win.isDestroyed() ? win : undefined,
+      backgroundColor: '#ffffff',
+      webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true },
+    }));
+    w.webContents.setWindowOpenHandler(({ url }) => {
+      w.loadURL(url);
+      return { action: 'deny' };
+    });
+    const finish = async () => {
+      if (done) return;
+      const cookies = await ses.cookies.get({ url: base });
+      const has = (n) => cookies.some((c) => c.name === n && c.value);
+      if (!has('sessionid') || !has('ds_user_id')) return;
+      done = true;
+      clearInterval(iv);
+      resolve(cookies.map((c) => `${c.name}=${c.value}`).join('; '));
+      w.destroy();
+      ses.clearStorageData().catch(() => {});
+    };
+    const iv = setInterval(() => finish().catch(() => {}), 600);
+    w.on('closed', () => {
+      clearInterval(iv);
+      loginWin = null;
+      if (!done) reject(new Error('Giriş tamamlanmadı (pencere kapatıldı).'));
+    });
+    w.loadURL(`${base}/accounts/login/`).catch(() => {});
+  });
+}
+
 // ---- IPC ----
 function registerIpc() {
   const handle = (name, fn) =>
@@ -124,11 +173,10 @@ function registerIpc() {
 
   handle('state', () => publicState());
 
-  handle('account:connect', async (token) => {
-    token = String(token || '').trim();
-    if (token.length < 20) throw new Error('Token çok kısa görünüyor. Meta panelinden kopyaladığınız token\'ı tamamen yapıştırın.');
-    const me = await new InstagramClient(token).me();
-    if (!me.user_id || !me.username) throw new Error('Hesap bilgisi alınamadı. Token\'ın Instagram hesabına ait olduğundan emin olun.');
+  handle('account:login', async () => {
+    const cookies = await loginWithInstagram();
+    const me = await new InstagramClient(cookies).me();
+    if (!me.user_id || !me.username) throw new Error('Hesap bilgisi alınamadı, lütfen tekrar deneyin.');
     const now = new Date().toISOString();
     const acc = store.upsertAccount({
       igUserId: String(me.user_id),
@@ -136,14 +184,13 @@ function registerIpc() {
       name: me.name || '',
       picture: me.profile_picture_url || '',
       accountType: me.account_type || '',
-      token,
+      token: cookies,
       connectedAt: now,
-      tokenRefreshedAt: now,
       status: 'ok',
       lastError: null,
       backoffUntil: null,
     });
-    store.addLog({ type: 'info', accountId: acc.id, account: acc.username, message: 'Hesap bağlandı.' });
+    store.addLog({ type: 'info', accountId: acc.id, account: acc.username, message: 'Instagram ile giriş yapıldı.' });
     store.save();
     return { id: acc.id, username: acc.username };
   });

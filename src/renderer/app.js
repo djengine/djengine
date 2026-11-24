@@ -44,7 +44,7 @@ const accName = (id) => {
 
 const STATUS = {
   ok: ['ok', 'Çalışıyor'],
-  auth: ['err', 'Yeniden bağlanmalı'],
+  auth: ['err', 'Yeniden giriş gerekli'],
   limit: ['warn', 'Limit — bekliyor'],
   offline: ['warn', 'İnternet yok'],
   error: ['err', 'Hata'],
@@ -111,9 +111,10 @@ function accountCard(a, withActions = false) {
       <div class="avatar">${a.picture ? `<img src="${esc(a.picture)}" alt="">` : initial}</div>
       <div style="flex:1;min-width:0">
         <div class="row" style="gap:8px"><strong>@${esc(a.username)}</strong><span class="pill ${cls}">${label}</span></div>
-        <div class="muted small">${ruleCount} otomasyon · son kontrol ${timeAgo(a.lastPollAt)}${a.tokenExpiresAt ? ` · token ${new Date(a.tokenExpiresAt).toLocaleDateString('tr-TR')} tarihine kadar geçerli (otomatik yenilenir)` : ''}</div>
+        <div class="muted small">${ruleCount} otomasyon · son kontrol ${timeAgo(a.lastPollAt)}</div>
         ${a.lastError ? `<div class="small" style="color:var(--err);margin-top:4px">${esc(a.lastError)}</div>` : ''}
       </div>
+      ${a.status === 'auth' ? `<button class="btn small primary" data-login="1" data-testid="relogin-${esc(a.username)}">Yeniden giriş yap</button>` : ''}
       ${withActions ? `<button class="btn small danger" data-remove-account="${esc(a.id)}">Kaldır</button>` : ''}
     </div>`;
 }
@@ -199,31 +200,27 @@ function renderRules() {
 function renderAccounts() {
   $('#view-accounts').innerHTML = `
     <h1>Hesaplar</h1>
-    <p class="lead">dj_engine ve gsridercyprus gibi hesaplarınızı buradan bağlayın. Her hesap için Meta panelinden alınan erişim anahtarı (token) gerekir.</p>
-    <div class="stack" style="margin-bottom:24px">${S.accounts.map((a) => accountCard(a, true)).join('')}</div>
+    <p class="lead">Instagram hesabınızla giriş yapın, o kadar. Birden fazla hesap ekleyebilirsiniz.</p>
+    <div class="stack gap-below">${S.accounts.map((a) => accountCard(a, true)).join('')}</div>
     <div class="card">
-      <h2>Hesap bağla</h2>
-      <label class="field">
-        <span>Instagram erişim anahtarı (token)</span>
-        <textarea id="token" data-testid="token-input" placeholder="IGAA… ile başlayan uzun anahtarı buraya yapıştırın" rows="3" spellcheck="false"></textarea>
-        <span class="hint">Token'ı nasıl alacağınız <a class="link" data-go="help">Kurulum Rehberi</a>'nde adım adım anlatılıyor. ${S.encryption ? 'Token, macOS Anahtar Zinciri ile şifrelenerek saklanır.' : ''}</span>
-      </label>
-      <button class="btn primary" id="connect" data-testid="connect">Hesabı bağla</button>
+      <h2>Hesap ekle</h2>
+      <p class="muted" style="margin-top:0">Instagram'ın giriş sayfası açılır. Kullanıcı adınızı ve şifrenizi orada girin; giriş bitince pencere kendiliğinden kapanır. Şifreniz bu uygulamada saklanmaz.</p>
+      <button class="btn primary" data-login="1" data-testid="login">Instagram ile Giriş Yap</button>
     </div>`;
-  $('#connect').onclick = async (e) => {
-    const token = $('#token').value;
-    e.target.disabled = true;
-    e.target.textContent = 'Bağlanıyor…';
-    try {
-      const r = await run(() => api.connectAccount(token));
-      toast(`@${r.username} bağlandı`);
-      $('#token').value = '';
-    } catch (_) {
-    } finally {
-      e.target.disabled = false;
-      e.target.textContent = 'Hesabı bağla';
-    }
-  };
+}
+
+async function login(btn) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Giriş penceresi açık…';
+  try {
+    const r = await run(() => api.login());
+    toast(`@${r.username} bağlandı`);
+  } catch (_) {
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
 }
 
 function renderActivity() {
@@ -269,23 +266,18 @@ function renderSettings() {
 function renderHelp() {
   $('#view-help').innerHTML = `
     <h1>Kurulum Rehberi</h1>
-    <p class="lead">Her hesap için bir kez yapılır, yaklaşık 10 dakika sürer. Uygulama sadece sizin hesaplarınızda çalışacağı için Meta incelemesine (App Review) gerek yoktur.</p>
+    <p class="lead">İki dakikada hazır.</p>
     <div class="card"><ol class="steps">
-      <li><b>Hesap türünü kontrol edin</b>Instagram'da her iki hesap da <i>Profesyonel</i> (İşletme veya İçerik Üreticisi) olmalı: Ayarlar → Hesap türü ve araçlar.</li>
-      <li><b>Meta geliştirici hesabı açın</b><a class="link" data-ext="https://developers.facebook.com/">developers.facebook.com</a> adresine Facebook hesabınızla girip "Başlayın" deyin.</li>
-      <li><b>Uygulama oluşturun</b>"Uygulamalarım → Uygulama oluştur". Kullanım durumu olarak <i>"Instagram ile mesajları ve içeriği yönetin"</i> seçeneğini seçin. Uygulama adı örneğin "DM Otomasyon Kişisel".</li>
-      <li><b>Hesaplarınızı test kullanıcısı yapın</b>Uygulama Rolleri → Roller → "Kişi ekle" → <i>Instagram Test Kullanıcısı</i> olarak <code>dj_engine</code> ve <code>gsridercyprus</code> hesaplarını ekleyin. Sonra Instagram'da Ayarlar → Uygulamalar ve web siteleri → Test kullanıcısı davetleri bölümünden daveti kabul edin.</li>
-      <li><b>Mesaj iznini açın</b>Instagram uygulamasında her hesap için: Ayarlar → Mesajlar ve hikaye cevapları → Mesaj kontrolleri → Bağlı araçlar → <i>"Mesajlara erişime izin ver"</i> seçeneğini açın.</li>
-      <li><b>Token oluşturun</b>Meta panelinde Instagram → "API kurulumu (Instagram girişi ile)" → "Erişim token'ları oluşturun" bölümünde hesabı ekleyin ve <i>"Token oluştur"</i>a tıklayın. Çıkan uzun metni kopyalayın.</li>
-      <li><b>Uygulamaya yapıştırın</b><a class="link" data-go="accounts">Hesaplar</a> sayfasına yapıştırıp "Hesabı bağla"ya basın. İkinci hesap için 6. adımı tekrarlayın.</li>
-      <li><b>Test modunda deneyin</b>Bir otomasyon oluşturun, başka bir hesaptan gönderinize yorum yazın ve Aktivite sayfasında "Test" kaydını görün. Her şey doğruysa Ayarlar'dan test modunu kapatın.</li>
+      <li><b>Giriş yapın</b><a class="link" data-go="accounts">Hesaplar</a> sayfasında <i>"Instagram ile Giriş Yap"</i>a basın, Instagram kullanıcı adınızı ve şifrenizi girin. İkinci hesap için tekrarlayın.</li>
+      <li><b>Otomasyon oluşturun</b><a class="link" data-go="rules">Otomasyonlar</a> sayfasında örneğin: gönderiye <code>SET</code> yazan kişiye linki DM'den gönder.</li>
+      <li><b>Test modunda deneyin</b>Başka bir hesaptan gönderinize yorum yazın ve Aktivite sayfasında "Test" kaydını görün. Her şey doğruysa test modunu kapatın.</li>
     </ol></div>
     <div class="card" style="margin-top:16px">
       <h2>Bilmeniz gerekenler</h2>
       <ul class="muted" style="margin:0;padding-left:18px">
+        <li><b>Risk:</b> Bu giriş yöntemi Instagram'ın resmî otomasyon yolu değildir. Instagram otomatik mesajları kurallarına aykırı sayıp hesabı geçici olarak kısıtlayabilir. Saatlik gönderim sınırını düşük tutun (Ayarlar).</li>
+        <li>Instagram bazen "Bu siz misiniz?" diye doğrulama isteyebilir. O zaman hesap "Yeniden giriş gerekli" olur; <i>"Yeniden giriş yap"</i>a basmanız yeterli.</li>
         <li>Otomasyon bu Mac açık ve uygulama çalışırken işler. Mac uykudaysa, uyandığında son 7 gün içindeki yorumlara cevap verilir.</li>
-        <li>Instagram kuralı: bir yoruma en fazla bir özel DM gönderilebilir; DM'lere ise kişi son yazdıktan sonraki 24 saat içinde cevap verilebilir.</li>
-        <li>Token'lar 60 gün geçerlidir; uygulama bunları otomatik olarak yeniler.</li>
         <li>Mesajlarda <code>{username}</code> yazarsanız kişinin kullanıcı adıyla değiştirilir. Birden fazla alternatif için cevapları ayrı satırda <code>---</code> ile ayırın, rastgele biri seçilir.</li>
       </ul>
     </div>`;
@@ -437,10 +429,11 @@ function go(v) {
 }
 
 document.addEventListener('click', async (e) => {
-  const t = e.target.closest('[data-view],[data-go],[data-ext],[data-filter],[data-edit-rule],[data-remove-rule],[data-remove-account]');
+  const t = e.target.closest('[data-view],[data-go],[data-ext],[data-filter],[data-edit-rule],[data-remove-rule],[data-remove-account],[data-login]');
   if (!t) return;
   const ds = t.dataset;
-  if (ds.view) go(ds.view);
+  if (ds.login) login(t);
+  else if (ds.view) go(ds.view);
   else if (ds.go) go(ds.go);
   else if (ds.ext) run(() => api.openExternal(ds.ext)).catch(() => {});
   else if (ds.filter) {

@@ -190,3 +190,4 @@ a.link { color: var(--accent); cursor: pointer; text-decoration: underline; }
 .toast.err { background: var(--err); color: #fff; }
 .rule-head > div { flex: 1 1 auto; min-width: 0; }
 .rule-head > .btn:first-of-type { margin-left: auto; }
+.gap-below { margin-bottom: 24px; }

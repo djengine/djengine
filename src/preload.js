@@ -10,7 +10,7 @@ async function call(name, ...args) {
 
 contextBridge.exposeInMainWorld('api', {
   state: () => call('state'),
-  connectAccount: (token) => call('account:connect', token),
+  login: () => call('account:login'),
   removeAccount: (id) => call('account:remove', id),
   media: (id) => call('account:media', id),
   saveRule: (rule) => call('rule:save', rule),

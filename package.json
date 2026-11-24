@@ -1,0 +1,31 @@
+{
+  "name": "dm-otomasyon",
+  "productName": "DM Otomasyon",
+  "version": "1.0.0",
+  "description": "Instagram yorum ve DM otomasyonu (kişisel kullanım için Mac uygulaması)",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "test:e2e": "node --test test/e2e/*.test.js",
+    "icons": "node scripts/make-icons.js",
+    "dist:mac": "electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.djengine.dmotomasyon",
+    "productName": "DM Otomasyon",
+    "files": ["src/**/*", "build/tray*.png", "package.json"],
+    "mac": {
+      "category": "public.app-category.social-networking",
+      "icon": "build/icon.png",
+      "target": [{ "target": "dmg" }],
+      "identity": "-"
+    },
+    "dmg": { "title": "DM Otomasyon" }
+  },
+  "devDependencies": {
+    "electron": "45.4.1",
+    "electron-builder": "26.0.12"
+  }
+}

@@ -8,18 +8,22 @@ const os = require('os');
 const path = require('path');
 const { _electron: electron } = require('playwright');
 const { createFakeInstagram } = require('../fake-instagram');
+const { createFakeOllama } = require('../fake-ollama');
 
 const ROOT = path.join(__dirname, '..', '..');
 const SHOTS = process.env.DMO_SHOTS || path.join(os.tmpdir(), 'dmo-shots');
 const U1 = 'dj_engine';
 const U2 = 'gsridercyprus';
 
+let OLLAMA_URL = '';
+const EXPORT_PATH = path.join(os.tmpdir(), `dmo-kisiler-${process.pid}.csv`);
+
 function launch(userData, fakeUrl) {
   const args = [ROOT];
   if (process.platform === 'linux') args.unshift('--no-sandbox');
   return electron.launch({
     args,
-    env: { ...process.env, IG_WEB_BASE: fakeUrl, DMO_USER_DATA: userData },
+    env: { ...process.env, IG_WEB_BASE: fakeUrl, DMO_USER_DATA: userData, OLLAMA_URL, DMO_EXPORT_PATH: EXPORT_PATH },
     executablePath: process.env.DMO_APP_EXECUTABLE || require('electron'),
   });
 }
@@ -41,12 +45,15 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
   fake.addAccount(U2, 'gs-sifre');
   const post = fake.addMedia(U1, 'Yeni set yayında 🎧');
   fake.addMedia(U1, 'Cuma gecesi');
+  const ollama = createFakeOllama();
+  OLLAMA_URL = await ollama.listen();
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'dmo-e2e-'));
 
   let app = null;
   t.after(async () => {
     try { if (app) await app.close(); } catch (_) {}
     await fake.close();
+    await ollama.close();
   });
   app = await launch(userData, fake.url);
   const page = await app.firstWindow();
@@ -191,6 +198,102 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
     assert.equal(fake.state.sent.length, 3);
   });
 
+  await t.test('takip şartlı hikâye otomasyonu: önce takip istenir, takip edince asıl mesaj gider', async () => {
+    await page.click('[data-view="rules"]');
+    await page.click('[data-testid="new-rule"]');
+    await page.fill('[data-testid="rule-name"]', 'Bilet');
+    await page.selectOption('[data-testid="rule-account"]', { label: '@dj_engine' });
+    await page.check('[data-testid="type-story"]');
+    assert.ok(await page.locator('#media-section').isHidden(), 'hikâyede gönderi seçimi görünmemeli');
+    await page.fill('[data-testid="rule-keywords"]', 'bilet');
+    await page.fill('[data-testid="rule-dm"]', 'Bilet linki: https://example.com/bilet');
+    await page.check('[data-testid="rule-gate"]');
+    await page.fill('[data-testid="rule-gate-text"]', 'Önce takip et {username} 🙌');
+    await page.screenshot({ path: path.join(SHOTS, '09-takip-sartli-hikaye.png') });
+    await page.click('[data-testid="rule-save"]');
+    await page.locator('[data-testid="rule-Bilet"]').waitFor();
+
+    const before = fake.state.sent.length;
+    fake.addMessage(U1, { username: 'fan', text: 'bilet nereden alınır?', story: true });
+    await page.evaluate(() => window.api.checkNow());
+    await waitFor(() => fake.state.sent.length === before + 1);
+    assert.equal(fake.state.sent.at(-1).text, 'Önce takip et @fan 🙌');
+
+    fake.follow(U1, 'u-fan');
+    fake.addMessage(U1, { username: 'fan', text: 'takip ettim' });
+    await page.evaluate(() => window.api.checkNow());
+    await waitFor(() => fake.state.sent.length === before + 2);
+    assert.equal(fake.state.sent.at(-1).text, 'Bilet linki: https://example.com/bilet');
+    await waitFor(async () => (await page.locator('[data-testid="st-unlocked-Bilet"]').textContent()) === '1');
+    assert.equal(await page.locator('[data-testid="st-gated-Bilet"]').textContent(), '1');
+    await page.screenshot({ path: path.join(SHOTS, '10-otomasyon-istatistik.png') });
+  });
+
+  await t.test('tarih kapsamında tarih seçilmeden kaydedilmez', async () => {
+    await page.click('[data-testid="new-rule"]');
+    await page.fill('[data-testid="rule-name"]', 'Tarihli');
+    await page.check('[data-testid="scope-since"]');
+    assert.ok(await page.locator('[data-testid="rule-since"]').isVisible());
+    await page.fill('[data-testid="rule-dm"]', 'x');
+    await page.click('[data-testid="rule-save"]');
+    assert.match(await page.locator('#rule-error').textContent(), /tarih/i);
+    await page.click('#rule-cancel');
+  });
+
+  await t.test('DM\'de verilen e-posta kişilere kaydedilir ve Excel\'e aktarılır', async () => {
+    fake.addMessage(U2, { username: 'otel', text: 'kiralama fiyatı? mailim rezervasyon@otel.com' });
+    await page.evaluate(() => window.api.checkNow());
+    await page.click('[data-view="contacts"]');
+    await page.locator('[data-testid="contact-otel"]').waitFor();
+    assert.match(await page.locator('[data-testid="contact-otel"]').textContent(), /rezervasyon@otel\.com/);
+    await page.fill('[data-testid="contact-search"]', 'otel');
+    assert.equal(await page.locator('[data-testid^="contact-"][data-testid$="fan"]').count(), 0);
+    await page.screenshot({ path: path.join(SHOTS, '11-kisiler.png') });
+    await page.click('[data-testid="export-contacts"]');
+    await waitFor(() => fs.existsSync(EXPORT_PATH));
+    const csv = fs.readFileSync(EXPORT_PATH, 'utf8');
+    assert.ok(csv.startsWith('﻿'), 'Excel için BOM olmalı');
+    assert.match(csv, /"otel";"gsridercyprus";"rezervasyon@otel\.com"/);
+    await page.fill('[data-testid="contact-search"]', '');
+  });
+
+  await t.test('yapay zekâ: model indirilir, asistan hesabı analiz eder', async () => {
+    await page.click('[data-view="ai"]');
+    await page.locator('[data-testid="ai-pull"]').waitFor();
+    await page.screenshot({ path: path.join(SHOTS, '12-yapay-zeka-kurulum.png') });
+    await page.click('[data-testid="ai-pull"]');
+    await page.locator('[data-testid="ai-ready"]').waitFor({ timeout: 15000 });
+    await page.selectOption('[data-testid="ai-account"]', { label: '@dj_engine' });
+    await page.getByRole('button', { name: '📊 Hesabımı analiz et' }).click();
+    await page.locator('[data-testid="ai-msg-assistant"]').waitFor({ timeout: 15000 });
+    assert.match(await page.locator('[data-testid="ai-msg-assistant"]').textContent(), /Analiz/);
+    const sys = ollama.state.chats.at(-1).messages[0].content;
+    assert.match(sys, /Hesap: @dj_engine/);
+    assert.match(sys, /Takipçi: 12\d\d/);
+    assert.match(sys, /Yeni set yayında/);
+    await page.screenshot({ path: path.join(SHOTS, '13-yapay-zeka-asistan.png') });
+  });
+
+  await t.test('otomatik pilot: DM\'lere yapay zekâ cevap verir', async () => {
+    await page.fill('[data-testid="pilot-text"]', 'DJ hizmeti. Fiyat için tarih sor.');
+    await page.locator('label:has([data-testid="pilot-on"])').click();
+    await waitFor(async () => {
+      const s = await page.evaluate(() => window.api.state());
+      return s.rules.some((r) => r.autopilot && r.active && r.aiInstructions === 'DJ hizmeti. Fiyat için tarih sor.');
+    });
+    const before = fake.state.sent.length;
+    fake.addMessage(U1, { username: 'gelin', text: 'düğün için müsait misiniz?' });
+    await page.evaluate(() => window.api.checkNow());
+    await waitFor(() => fake.state.sent.length === before + 1, 15000);
+    assert.equal(fake.state.sent.at(-1).text, 'Merhaba! Bilgileri hemen gönderiyorum 🙌');
+    assert.equal(fake.state.sent.at(-1).to, 'u-gelin');
+    const reply = ollama.state.chats.at(-1).messages[1].content;
+    assert.match(reply, /DJ hizmeti\. Fiyat için tarih sor\./);
+    assert.match(reply, /<gelen_mesaj>\ndüğün için müsait misiniz\?/);
+    await page.locator('label:has([data-testid="pilot-on"])').click();
+    await waitFor(async () => !(await page.evaluate(() => window.api.state())).rules.find((r) => r.autopilot).active);
+  });
+
   await t.test('oturum kapanınca "Yeniden giriş yap" ile tek tıkla düzelir', async () => {
     fake.expireSession(U2);
     await page.evaluate(() => window.api.checkNow());
@@ -236,7 +339,7 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
     const p2 = await app.firstWindow();
     const s = await p2.evaluate(() => window.api.state());
     assert.deepEqual(s.accounts.map((a) => a.username).sort(), ['dj_engine', 'gsridercyprus']);
-    assert.equal(s.rules.length, 2);
+    assert.equal(s.rules.length, 4);
     assert.equal(s.settings.dryRun, false);
   });
 

@@ -1,10 +1,12 @@
 'use strict';
 
 const path = require('path');
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, powerSaveBlocker, safeStorage, shell, Notification, session } = require('electron');
+const fs = require('fs');
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, powerSaveBlocker, safeStorage, shell, Notification, session, dialog } = require('electron');
 const { Store } = require('./core/store');
 const { Engine } = require('./core/engine');
 const { InstagramClient, USER_AGENT, parseCookies } = require('./core/instagram');
+const { AI, MODELS, DEFAULT_MODEL } = require('./core/ai');
 
 if (process.env.DMO_USER_DATA) app.setPath('userData', process.env.DMO_USER_DATA);
 
@@ -17,6 +19,7 @@ let win = null;
 let tray = null;
 let store = null;
 let engine = null;
+let ai = null;
 let timer = null;
 let nextTickAt = null;
 let blockerId = null;
@@ -94,6 +97,10 @@ function publicState() {
     settings: d.settings,
     accounts: d.accounts.map(({ token, ...a }) => ({ ...a, hasToken: !!token })),
     rules: d.rules,
+    stats: d.stats,
+    contacts: d.contacts.slice(0, 1000),
+    contactsTotal: d.contacts.length,
+    ai: { models: MODELS, model: d.settings.aiModel || DEFAULT_MODEL },
     log: d.log.slice(0, 300),
     engine: { busy: engine.busy, lastTickAt: engine.lastTickAt, nextTickAt },
     encryption: safeStorage.isEncryptionAvailable(),
@@ -271,6 +278,55 @@ async function syncCookies() {
   if (changed) store.save();
 }
 
+// ---- Yapay zekâ asistanı için hesap verisi ----
+const contextCache = new Map(); // hesap id -> { at, text }
+async function accountContext(acc) {
+  const hit = contextCache.get(acc.id);
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.text;
+  const c = clientFor(acc.token, acc.igUserId);
+  const [me, media] = await Promise.all([c.me().catch(() => ({})), c.recentMedia(24).catch(() => [])]);
+  const n = (v) => (v == null ? '?' : String(v));
+  const lines = [
+    `Bugün: ${new Date().toISOString().slice(0, 10)}`,
+    `Hesap: @${acc.username}${me.name ? ` (${me.name})` : ''}${me.category ? ` · ${me.category}` : ''}`,
+    `Biyografi: ${me.biography || '(alınamadı)'}`,
+    `Takipçi: ${n(me.follower_count)} · Takip edilen: ${n(me.following_count)} · Gönderi: ${n(me.media_count)}`,
+    '',
+    `Son ${media.length} gönderi (yeniden eskiye): tarih | tür | beğeni | yorum | izlenme | açıklama`,
+    ...media.map(
+      (m) =>
+        `- ${(m.timestamp || '').slice(0, 10)} | ${m.is_reel ? 'Reels' : m.media_type === 8 ? 'Albüm' : m.media_type === 2 ? 'Video' : 'Fotoğraf'} | ${n(m.like_count)} | ${n(m.comments_count)} | ${n(m.play_count)} | ${String(m.caption || '').replace(/\s+/g, ' ').slice(0, 160)}`
+    ),
+    '',
+    'Uygulamadaki otomasyonlar:',
+    ...store.data.rules
+      .filter((r) => r.accountId === acc.id)
+      .map((r) => {
+        const s = store.data.stats[r.id] || {};
+        return `- ${r.name} (${r.type}, kelimeler: ${r.keywords || 'hepsi'}, ${r.active ? 'aktif' : 'kapalı'}) tetiklenme ${s.triggered || 0}, gönderilen ${s.sent || 0}, takip şartına takılan ${s.gated || 0}`;
+      }),
+    `Toplanan kişi: ${store.data.contacts.filter((x) => x.accountId === acc.id).length}`,
+  ];
+  const text = lines.join('\n');
+  contextCache.set(acc.id, { at: Date.now(), text });
+  return text;
+}
+
+function contactsCsv() {
+  const accName = (id) => (store.getAccount(id) || {}).username || '';
+  const cell = (v) => {
+    let s = String(v == null ? '' : v);
+    if (/^[=+\-@]/.test(s)) s = `'${s}`; // Excel formül enjeksiyonunu önle
+    return `"${s.replace(/"/g, '""')}"`;
+  };
+  const rows = [['Kullanıcı adı', 'Hesap', 'E-posta', 'Telefon', 'Etiketler', 'Etkileşim', 'İlk görülme', 'Son görülme', 'Son mesaj']];
+  for (const c of store.data.contacts) {
+    rows.push([c.username || c.userId, accName(c.accountId), c.email, c.phone, (c.tags || []).join(', '), c.interactions, c.firstSeen, c.lastSeen, c.lastMessage]);
+  }
+  // Excel'in Türkçe karakterleri doğru açması için BOM; Türkçe Excel ';' ayırıcı bekler
+  return '\ufeff' + rows.map((r) => r.map(cell).join(';')).join('\r\n');
+}
+
 // ---- IPC ----
 function registerIpc() {
   const handle = (name, fn) =>
@@ -339,8 +395,11 @@ function registerIpc() {
   handle('rule:save', (rule) => {
     if (!rule.name || !rule.name.trim()) throw new Error('Kurala bir isim verin.');
     if (!store.getAccount(rule.accountId)) throw new Error('Bir hesap seçin.');
-    if (!['comment', 'dm'].includes(rule.type)) throw new Error('Tetikleyici türü geçersiz.');
-    if (!rule.dmText || !rule.dmText.trim()) throw new Error('Gönderilecek DM mesajını yazın.');
+    if (!['comment', 'dm', 'story'].includes(rule.type)) throw new Error('Tetikleyici türü geçersiz.');
+    rule.replyMode = rule.replyMode === 'ai' ? 'ai' : 'fixed';
+    if (rule.replyMode === 'fixed' && !String(rule.dmText || '').trim()) throw new Error('Gönderilecek DM mesajını yazın.');
+    if (rule.type === 'comment' && rule.mediaScope === 'since' && Number.isNaN(Date.parse(rule.sinceDate || '')))
+      throw new Error('"Şu tarihten sonraki gönderiler" için bir tarih seçin.');
     if (rule.type === 'comment' && rule.mediaScope === 'selected' && !(rule.mediaIds || []).length)
       throw new Error('En az bir gönderi seçin ya da "Tüm son gönderiler" seçeneğini kullanın.');
     if (rule.publicReplyEnabled && !String(rule.publicReplyText || '').trim())
@@ -351,9 +410,10 @@ function registerIpc() {
   handle('rule:remove', (id) => store.removeRule(id));
 
   handle('settings:update', (patch) => {
-    const allowed = ['pollSeconds', 'recentPosts', 'maxSendsPerHour', 'dryRun', 'running', 'openAtLogin', 'notifications'];
+    const allowed = ['pollSeconds', 'recentPosts', 'maxSendsPerHour', 'dryRun', 'running', 'openAtLogin', 'notifications', 'aiModel'];
     const clean = {};
     for (const k of allowed) if (k in patch) clean[k] = patch[k];
+    if ('aiModel' in clean && !/^[\w.:/-]{1,80}$/.test(String(clean.aiModel))) throw new Error('Model adı geçersiz.');
     if ('pollSeconds' in clean) clean.pollSeconds = Math.min(600, Math.max(30, Number(clean.pollSeconds) || 60));
     if ('recentPosts' in clean) clean.recentPosts = Math.min(25, Math.max(1, Number(clean.recentPosts) || 10));
     if ('maxSendsPerHour' in clean) clean.maxSendsPerHour = Math.min(200, Math.max(1, Number(clean.maxSendsPerHour) || 40));
@@ -370,9 +430,69 @@ function registerIpc() {
 
   handle('log:clear', () => store.clearLog());
 
+  // ---- Yapay zekâ (Ollama) ----
+  handle('ai:status', () => ai.status());
+
+  let pulling = null;
+  handle('ai:pull', async () => {
+    if (pulling) return pulling;
+    const send = (p) => win && !win.isDestroyed() && win.webContents.send('ai-progress', p);
+    pulling = ai
+      .pull((pct, status) => send({ pct, status }))
+      .then(() => send({ pct: 100, status: 'success', done: true }))
+      .finally(() => {
+        pulling = null;
+      });
+    return pulling;
+  });
+
+  handle('ai:chat', async ({ accountId, messages } = {}) => {
+    const acc = store.getAccount(accountId);
+    if (!acc || !acc.token) throw new Error('Önce bir Instagram hesabı bağlayın.');
+    const context = await accountContext(acc);
+    return ai.chat({ context, messages: messages || [] });
+  });
+
+  // "Otomatik pilot": hesabın tüm DM'lerine yapay zekâ cevap verir
+  handle('ai:autopilot', ({ accountId, enabled, instructions } = {}) => {
+    const acc = store.getAccount(accountId);
+    if (!acc) throw new Error('Hesap bulunamadı.');
+    const existing = store.data.rules.find((r) => r.accountId === acc.id && r.autopilot);
+    return store.saveRule({
+      ...(existing || {}),
+      name: 'Yapay zekâ otomatik cevap',
+      accountId: acc.id,
+      type: 'dm',
+      keywords: '',
+      replyMode: 'ai',
+      aiInstructions: String(instructions || '').slice(0, 4000),
+      dmText: '',
+      oncePerUser: false,
+      autopilot: true,
+      active: !!enabled,
+    });
+  });
+
+  // ---- Kişiler ----
+  handle('contacts:export', async () => {
+    const csv = contactsCsv();
+    let file = process.env.DMO_EXPORT_PATH;
+    if (!file) {
+      const r = await dialog.showSaveDialog(win, {
+        title: 'Kişileri kaydet',
+        defaultPath: path.join(app.getPath('desktop'), `kisiler-${new Date().toISOString().slice(0, 10)}.csv`),
+        filters: [{ name: 'CSV (Excel)', extensions: ['csv'] }],
+      });
+      if (r.canceled || !r.filePath) return null;
+      file = r.filePath;
+    }
+    fs.writeFileSync(file, csv, 'utf8');
+    return file;
+  });
+
   handle('open:external', (url) => {
     const u = new URL(url);
-    const ok = u.protocol === 'https:' && /(^|\.)(instagram\.com|facebook\.com|meta\.com)$/.test(u.hostname);
+    const ok = u.protocol === 'https:' && /(^|\.)(instagram\.com|facebook\.com|meta\.com|ollama\.com)$/.test(u.hostname);
     if (!ok) throw new Error('Bu bağlantı açılamaz.');
     return shell.openExternal(url);
   });
@@ -461,7 +581,8 @@ app.on('window-all-closed', (e) => e.preventDefault && e.preventDefault());
 app.whenReady().then(() => {
   store = new Store(path.join(app.getPath('userData'), 'data.json'), { encrypt, decrypt });
   if (store.settings.notifications == null) store.updateSettings({ notifications: true });
-  engine = new Engine({ store, clientFactory: (cookies, acc) => clientFor(cookies, acc.igUserId) });
+  ai = new AI(() => ({ model: store.settings.aiModel || DEFAULT_MODEL }));
+  engine = new Engine({ store, ai, clientFactory: (cookies, acc) => clientFor(cookies, acc.igUserId) });
   store.onChange(pushState);
   registerIpc();
   createTray();

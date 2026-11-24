@@ -211,3 +211,122 @@ test('oturum çerezleri doğru okunur ve büyük sayılar metin olarak korunur',
   assert.equal(j.n, 5);
   assert.deepEqual(j.items, ['17912345678901234']);
 });
+
+// ---------------- Yeni özellikler ----------------
+
+test('takip şartı: takip etmeyene önce "takip et" mesajı, takip edip yazınca asıl mesaj gider', async (t) => {
+  const { fake, store, engine, acc } = await setup();
+  t.after(() => fake.close());
+  const post = fake.addMedia('dj_engine', 'Ücretsiz set');
+  const rule = store.saveRule({
+    name: 'Set (takip şartlı)', accountId: acc.id, type: 'comment', keywords: 'set', mediaScope: 'all',
+    dmText: 'İşte link: https://ornek.com/set', followGate: true, followPrompt: 'Önce takip et {username}',
+  });
+  fake.addComment('dj_engine', post.id, { username: 'ali', text: 'SET' });
+  await engine.tick();
+  assert.deepEqual(fake.state.sent.map((s) => s.text), ['Önce takip et @ali']);
+  assert.ok(store.data.log.some((l) => l.type === 'gate'));
+
+  // Takip etmeden yazarsa asıl mesaj gitmez
+  fake.addMessage('dj_engine', { username: 'ali', text: 'tamam' });
+  await engine.tick();
+  assert.equal(fake.state.sent.length, 1);
+
+  // Takip edip yazınca asıl mesaj gider
+  fake.follow('dj_engine', 'u-ali');
+  fake.addMessage('dj_engine', { username: 'ali', text: 'takip ettim' });
+  await engine.tick();
+  assert.deepEqual(fake.state.sent.map((s) => s.text), ['Önce takip et @ali', 'İşte link: https://ornek.com/set']);
+  const stats = store.data.stats[rule.id];
+  assert.equal(stats.triggered, 1);
+  assert.equal(stats.gated, 1);
+  assert.equal(stats.unlocked, 1);
+  assert.equal(stats.sent, 1);
+});
+
+test('takip şartı: zaten takip eden doğrudan asıl mesajı alır', async (t) => {
+  const { fake, store, engine, acc } = await setup();
+  t.after(() => fake.close());
+  const post = fake.addMedia('dj_engine', 'x');
+  store.saveRule({ name: 'r', accountId: acc.id, type: 'comment', keywords: '', mediaScope: 'all', dmText: 'link', followGate: true });
+  fake.follow('dj_engine', 'u-veli');
+  fake.addComment('dj_engine', post.id, { username: 'veli', text: 'selam' });
+  await engine.tick();
+  assert.deepEqual(fake.state.sent.map((s) => s.text), ['link']);
+});
+
+test('gönderi kapsamı: sadece Reels ve belirli tarihten sonraki gönderiler', async (t) => {
+  const { fake, store, engine, acc } = await setup();
+  t.after(() => fake.close());
+  const old = fake.addMedia('dj_engine', 'eski', Math.floor(Date.parse('2026-01-01') / 1000));
+  const fresh = fake.addMedia('dj_engine', 'yeni', Math.floor(Date.now() / 1000));
+  const reel = fake.addMedia('dj_engine', 'reels', Math.floor(Date.now() / 1000), { reel: true });
+  store.saveRule({ name: 'reels', accountId: acc.id, type: 'comment', keywords: 'reel', mediaScope: 'reels', dmText: 'R' });
+  store.saveRule({ name: 'tarih', accountId: acc.id, type: 'comment', keywords: 'tarih', mediaScope: 'since', sinceDate: '2026-06-01', dmText: 'T' });
+  for (const m of [old, fresh, reel]) {
+    fake.addComment('dj_engine', m.id, { username: `a${m.caption}`, text: 'reel' });
+    fake.addComment('dj_engine', m.id, { username: `b${m.caption}`, text: 'tarih' });
+  }
+  await engine.tick();
+  const got = fake.state.sent.map((s) => `${s.text}:${s.to}`).sort();
+  assert.deepEqual(got, ['R:u-areels', 'T:u-breels', 'T:u-byeni']);
+});
+
+test('hikâye cevabı tetikleyicisi sadece hikâye cevaplarında çalışır', async (t) => {
+  const { fake, store, engine, acc } = await setup();
+  t.after(() => fake.close());
+  store.saveRule({ name: 'Hikâye', accountId: acc.id, type: 'story', keywords: 'bilet', dmText: 'Bilet linki: x' });
+  fake.addMessage('dj_engine', { username: 'h1', text: 'bilet var mı?', story: true });
+  fake.addMessage('dj_engine', { username: 'd1', text: 'bilet var mı?' });
+  await engine.tick();
+  assert.deepEqual(fake.state.sent.map((s) => s.to), ['u-h1']);
+  assert.equal(store.data.log.find((l) => l.type === 'sent').trigger, 'story');
+});
+
+test('DM\'de verilen e-posta ve telefon kişilere kaydedilir', async (t) => {
+  const { fake, store, engine, acc } = await setup();
+  t.after(() => fake.close());
+  store.saveRule({ name: 'Booking', accountId: acc.id, type: 'dm', keywords: 'booking', dmText: 'Mailini yazar mısın?' });
+  fake.addMessage('dj_engine', { username: 'mekan', text: 'booking için yazıyorum' });
+  await engine.tick();
+  fake.addMessage('dj_engine', { username: 'mekan', text: 'mailim info@mekan.com, tel +90 532 123 45 67' });
+  await engine.tick();
+  const c = store.data.contacts.find((x) => x.username === 'mekan');
+  assert.equal(c.email, 'info@mekan.com');
+  assert.equal(c.phone, '+90 532 123 45 67');
+  assert.deepEqual(c.tags, ['Booking']);
+  assert.ok(store.data.log.some((l) => l.type === 'lead'));
+});
+
+test('yapay zekâ cevabı: metni yapay zekâ yazar; yapay zekâ çalışmıyorsa mesaj kaybolmaz', async (t) => {
+  const { fake, store, acc } = await setup();
+  t.after(() => fake.close());
+  let up = false;
+  const calls = [];
+  const ai = {
+    async reply(args) {
+      calls.push(args);
+      if (!up) throw new Error('Ollama çalışmıyor');
+      return `Merhaba @${args.username}, fiyatlar DM'de 🙌`;
+    },
+  };
+  const engine = new Engine({ store, clientFactory: (tk) => new InstagramClient(tk, { baseUrl: fake.url }), random: () => 0, ai });
+  store.saveRule({ name: 'AI', accountId: acc.id, type: 'dm', keywords: '', dmText: '', replyMode: 'ai', aiInstructions: 'Kibar ol' });
+  fake.addMessage('dj_engine', { username: 'musteri', text: 'fiyat nedir' });
+  await engine.tick();
+  assert.equal(fake.state.sent.length, 0);
+  assert.match(acc.lastError, /Yapay zekâ/);
+  up = true;
+  await engine.tick();
+  assert.deepEqual(fake.state.sent.map((s) => s.text), ["Merhaba @musteri, fiyatlar DM'de 🙌"]);
+  assert.equal(calls.at(-1).instructions, 'Kibar ol');
+  assert.equal(calls.at(-1).incoming, 'fiyat nedir');
+  assert.equal(calls.at(-1).kind, 'dm');
+});
+
+test('kişi bilgisi ayıklama', () => {
+  const { extractLead } = require('../src/core/engine');
+  assert.deepEqual(extractLead('mail: a.b+c@x.com.tr'), { email: 'a.b+c@x.com.tr', phone: null });
+  assert.deepEqual(extractLead('05321234567 ara'), { email: null, phone: '05321234567' });
+  assert.deepEqual(extractLead('2026 yılında 3 set'), { email: null, phone: null });
+});

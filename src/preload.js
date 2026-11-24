@@ -19,6 +19,16 @@ contextBridge.exposeInMainWorld('api', {
   checkNow: () => call('check:now'),
   clearLog: () => call('log:clear'),
   openExternal: (url) => call('open:external', url),
+  aiStatus: () => call('ai:status'),
+  aiPull: () => call('ai:pull'),
+  aiChat: (accountId, messages) => call('ai:chat', { accountId, messages }),
+  aiAutopilot: (accountId, enabled, instructions) => call('ai:autopilot', { accountId, enabled, instructions }),
+  exportContacts: () => call('contacts:export'),
+  onAiProgress: (fn) => {
+    const h = (_e, p) => fn(p);
+    ipcRenderer.on('ai-progress', h);
+    return () => ipcRenderer.removeListener('ai-progress', h);
+  },
   onState: (fn) => {
     const h = (_e, s) => fn(s);
     ipcRenderer.on('state', h);

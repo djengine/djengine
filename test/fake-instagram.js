@@ -13,6 +13,7 @@ function createFakeInstagram() {
     requests: [],
     failNext: null, // { status, body }
     rateLimitProfile: false, // profil isteğine 429 (gerçek Instagram'da görülen durum)
+    followers: {}, // username -> Set(takipçi kullanıcı id)
     rurSeen: 0, // sunucunun verdiği rur çerezini geri gönderen istek sayısı (tarayıcı çerez kavanozu kanıtı)
     logins: 0,
   };
@@ -29,14 +30,18 @@ function createFakeInstagram() {
       state.accounts[username] = acc;
       state.media[username] = [];
       state.threads[username] = [];
+      state.followers[username] = new Set();
       return { ...acc, user_id: pk, session: `sessionid=${acc.sessionid}; ds_user_id=${pk}; csrftoken=csrf-${pk}` };
     },
     expireSession(username) {
       state.accounts[username].sessionid = `expired-${Date.now()}`;
     },
-    addMedia(username, caption, takenAt = Math.floor(Date.now() / 1000)) {
+    follow(username, followerId) {
+      state.followers[username].add(followerId);
+    },
+    addMedia(username, caption, takenAt = Math.floor(Date.now() / 1000), { reel = false, likes = 0 } = {}) {
       const pk = bigId();
-      const m = { pk, code: `C${pk.slice(-6)}`, caption, taken_at: takenAt, comments: [] };
+      const m = { pk, code: `C${pk.slice(-6)}`, caption, taken_at: takenAt, comments: [], reel, likes };
       state.media[username].unshift(m);
       return { id: pk, ...m };
     },
@@ -46,14 +51,18 @@ function createFakeInstagram() {
       m.comments.unshift(c);
       return { id: c.pk, ...c };
     },
-    addMessage(username, { username: from, text, fromId = `u-${from}`, at = Date.now() }) {
+    addMessage(username, { username: from, text, fromId = `u-${from}`, at = Date.now(), story = false }) {
       let t = state.threads[username].find((x) => x.with === fromId);
       if (!t) {
         t = { thread_id: bigId(), with: fromId, users: [{ pk: fromId, username: from }], items: [] };
         state.threads[username].unshift(t);
       }
       const ts = String(at * 1000); // mikrosaniye
-      t.items.unshift({ item_id: bigId(), user_id: fromId, timestamp: ts, item_type: 'text', text });
+      t.items.unshift(
+        story
+          ? { item_id: bigId(), user_id: fromId, timestamp: ts, item_type: 'reel_share', reel_share: { type: 'reply', text, media: {} } }
+          : { item_id: bigId(), user_id: fromId, timestamp: ts, item_type: 'text', text }
+      );
       t.last_activity_at = ts;
       return t;
     },
@@ -134,7 +143,10 @@ function createFakeInstagram() {
         code: m.code,
         caption: { text: m.caption },
         taken_at: m.taken_at,
-        media_type: 1,
+        media_type: m.reel ? 2 : 1,
+        product_type: m.reel ? 'clips' : 'feed',
+        like_count: m.likes,
+        play_count: m.reel ? m.likes * 10 : undefined,
         comment_count: m.comments.length,
         image_versions2: { candidates: [] },
       });
@@ -145,7 +157,22 @@ function createFakeInstagram() {
         if (state.rateLimitProfile) return send(res, 429, {});
         const u = Object.values(state.accounts).find((a) => a.pk === m[1]);
         if (!u) return send(res, 404, { message: 'User not found', status: 'fail' });
-        return send(res, 200, { user: { pk: u.pk, username: u.username, full_name: u.username, profile_pic_url: '' }, status: 'ok' });
+        return send(res, 200, {
+          user: {
+            pk: u.pk,
+            username: u.username,
+            full_name: u.username,
+            profile_pic_url: '',
+            biography: 'DJ / prodüktör',
+            follower_count: 1200 + state.followers[u.username].size,
+            following_count: 300,
+            media_count: state.media[u.username].length,
+          },
+          status: 'ok',
+        });
+      }
+      if ((m = p.match(/^\/api\/v1\/friendships\/show\/([^/]+)\/$/))) {
+        return send(res, 200, { followed_by: state.followers[acc.username].has(m[1]), following: false, status: 'ok' });
       }
       if ((m = p.match(/^\/api\/v1\/feed\/user\/([^/]+)\/$/))) {
         const count = Number(url.searchParams.get('count') || 12);

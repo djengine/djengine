@@ -59,6 +59,10 @@ function normalizeMedia(m) {
     media_type: m.media_type,
     thumbnail_url: (img && img.url) || (carouselImg && carouselImg.url) || null,
     comments_count: m.comment_count != null ? Number(m.comment_count) : null,
+    like_count: m.like_count != null ? Number(m.like_count) : null,
+    play_count: m.play_count != null ? Number(m.play_count) : m.view_count != null ? Number(m.view_count) : null,
+    // Reels: product_type "clips" (video gönderiler de media_type 2'dir ama Reels değildir)
+    is_reel: m.product_type === 'clips',
   };
 }
 
@@ -140,7 +144,19 @@ class InstagramClient {
       name: u.full_name || '',
       profile_picture_url: u.profile_pic_url || '',
       account_type: u.is_business ? 'BUSINESS' : '',
+      biography: u.biography || '',
+      follower_count: u.follower_count != null ? Number(u.follower_count) : null,
+      following_count: u.following_count != null ? Number(u.following_count) : null,
+      media_count: u.media_count != null ? Number(u.media_count) : null,
+      category: u.category || '',
     };
+  }
+
+  // Kişi bu hesabı takip ediyor mu?
+  async isFollower(userId) {
+    if (!userId || String(userId).startsWith('u:')) return false;
+    const r = await this.request('GET', `/friendships/show/${userId}/`);
+    return !!r.followed_by;
   }
 
   async recentMedia(limit = 10) {
@@ -200,11 +216,14 @@ class InstagramClient {
     const users = new Map((t.users || []).map((u) => [String(u.pk || u.pk_id), u.username]));
     return (t.items || []).slice(0, limit).map((it) => {
       const from = String(it.user_id);
+      // Hikâyeye cevap: item_type "reel_share" (type "reply"), metni reel_share.text içinde
+      const story = it.item_type === 'reel_share' && it.reel_share && it.reel_share.type !== 'mention';
       return {
         id: String(it.item_id),
         created_time: isoMicro(it.timestamp),
         from: { id: from, username: users.get(from) || '' },
-        message: it.item_type === 'text' ? it.text || '' : '',
+        kind: story ? 'story' : 'dm',
+        message: it.item_type === 'text' ? it.text || '' : story ? it.reel_share.text || '' : '',
       };
     });
   }

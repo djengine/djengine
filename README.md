@@ -17,6 +17,18 @@
 
 > Otomasyon Mac açık ve uygulama çalışırken işler. Mac uykudan uyanınca, kapalıyken gelen son 7 günlük yorumlara cevap verilir.
 
+## Yeni özellikler
+- **Takip şartı:** Mesaj sadece takipçilere gider. Takip etmeyene "önce takip et" mesajı gider; takip edip yazınca asıl mesaj otomatik gönderilir.
+- **Gönderi kapsamı:** Tüm son gönderiler, sadece Reels, belirli bir tarihten sonraki gönderiler veya seçilen gönderiler.
+- **Hikâye cevabı tetikleyicisi:** Hikâyenize anahtar kelimeyle cevap verene otomatik DM.
+- **Kişiler:** Etkileşime giren herkes listelenir; DM'de paylaşılan e-posta/telefon otomatik kaydedilir ve Excel'e (CSV) aktarılır.
+- **İstatistik:** Her otomasyon için tetiklenme, gönderim ve takip şartı sayıları.
+- **Ücretsiz yapay zekâ (Ollama):** Hesap analizi, haftalık içerik planı, gönderi metni, bio ve büyüme stratejisi önerileri; otomasyon cevaplarını yapay zekâ yazabilir; **Otomatik pilot** tüm DM'lere sizin yerinize cevap verir. Model Mac'inizde çalışır, ücretsizdir, veriler dışarı gönderilmez.
+
+### Yapay zekâ kurulumu (bir kez)
+1. [ollama.com/download](https://ollama.com/download) adresinden Ollama'yı indirip açın.
+2. Uygulamada **Yapay Zekâ** sayfasında **Modeli indir**'e basın (Gemma 3 4B, ~3,3 GB).
+
 ## Mac'e kurulum (kaynaktan)
 1. [Node.js](https://nodejs.org) LTS sürümünü kurun.
 2. Terminal'de çalıştırın:

@@ -6,6 +6,7 @@ const crypto = require('crypto');
 
 const MAX_SEEN = 5000;
 const MAX_LOG = 1000;
+const MAX_CONTACTS = 20000;
 
 function defaultData() {
   return {
@@ -17,10 +18,13 @@ function defaultData() {
       dryRun: true,
       running: true,
       openAtLogin: false,
+      aiModel: '',
     },
     accounts: [],
     rules: [],
     log: [],
+    contacts: [], // etkileşime giren kişiler: e-posta/telefon, etiketler
+    stats: {}, // otomasyon (kural) başına sayaçlar
     state: {}, // hesap bazında: görülen yorum/mesaj id'leri, yorum sayıları, gönderim geçmişi
   };
 }
@@ -124,6 +128,7 @@ class Store {
   removeAccount(id) {
     this.data.accounts = this.data.accounts.filter((a) => a.id !== id);
     this.data.rules = this.data.rules.filter((r) => r.accountId !== id);
+    this.data.contacts = this.data.contacts.filter((c) => c.accountId !== id);
     delete this.data.state[id];
     this.save();
   }
@@ -154,6 +159,7 @@ class Store {
 
   removeRule(id) {
     this.data.rules = this.data.rules.filter((r) => r.id !== id);
+    delete this.data.stats[id];
     this.save();
   }
 
@@ -162,7 +168,36 @@ class Store {
     if (!this.data.state[accountId]) {
       this.data.state[accountId] = { seen: [], commentCounts: {}, convUpdated: {}, sentTo: [], sendTimes: [] };
     }
-    return this.data.state[accountId];
+    const st = this.data.state[accountId];
+    if (!st.gates) st.gates = {}; // takip şartı bekleyenler: "kuralId:kullanıcıId" -> hedef
+    return st;
+  }
+
+  // ---- Kişiler ----
+  upsertContact(accountId, userId, { username, tag, email, phone, text } = {}) {
+    if (!userId) return null;
+    const now = new Date().toISOString();
+    let c = this.data.contacts.find((x) => x.accountId === accountId && x.userId === String(userId));
+    if (!c) {
+      c = { id: crypto.randomUUID(), accountId, userId: String(userId), username: '', tags: [], firstSeen: now, interactions: 0 };
+      this.data.contacts.unshift(c);
+      if (this.data.contacts.length > MAX_CONTACTS) this.data.contacts.length = MAX_CONTACTS;
+    }
+    if (username) c.username = username;
+    if (tag && !c.tags.includes(tag)) c.tags.push(tag);
+    if (email) c.email = email;
+    if (phone) c.phone = phone;
+    if (text) c.lastMessage = String(text).slice(0, 300);
+    c.lastSeen = now;
+    c.interactions = (c.interactions || 0) + 1;
+    return c;
+  }
+
+  // ---- İstatistik ----
+  bumpStat(ruleId, key, n = 1) {
+    if (!ruleId) return;
+    const s = (this.data.stats[ruleId] = this.data.stats[ruleId] || {});
+    s[key] = (s[key] || 0) + n;
   }
 
   hasSeen(accountId, key) {

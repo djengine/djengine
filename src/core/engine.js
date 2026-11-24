@@ -8,15 +8,37 @@ const DAY = 24 * HOUR;
 const PRIVATE_REPLY_WINDOW = 7 * DAY; // Instagram: yoruma özel DM en fazla 7 gün içinde
 const MESSAGING_WINDOW = DAY; // Instagram: kişi son yazdıktan sonra 24 saat içinde cevap
 const RATE_LIMIT_BACKOFF = 15 * 60 * 1000;
+const GATE_TTL = 7 * DAY; // takip şartı bekleyenler bu süre sonra unutulur
+
+const DEFAULT_FOLLOW_PROMPT =
+  "Selam {username}! 🙌 Mesajı gönderebilmem için önce hesabımı takip etmen gerekiyor. Takip ettikten sonra bana buradan \"tamam\" yazman yeterli, hemen gönderiyorum.";
+
+const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const PHONE_RE = /(\+?\d[\d\s().-]{8,}\d)/;
 
 class RetryLater extends Error {}
 
+// DM metninden e-posta ve telefon çıkarır (kişi toplama)
+function extractLead(text) {
+  const s = String(text || '');
+  const email = (s.match(EMAIL_RE) || [])[0] || null;
+  let phone = null;
+  const m = s.replace(EMAIL_RE, ' ').match(PHONE_RE);
+  if (m) {
+    const digits = m[1].replace(/\D/g, '');
+    if (digits.length >= 10 && digits.length <= 15) phone = m[1].trim();
+  }
+  return { email, phone };
+}
+
 class Engine {
-  constructor({ store, clientFactory, now, random } = {}) {
+  // ai: { reply({account, instructions, kind, username, incoming}) } — yapay zekâ cevapları için (isteğe bağlı)
+  constructor({ store, clientFactory, now, random, ai } = {}) {
     this.store = store;
     this.clientFactory = clientFactory || ((token) => new InstagramClient(token));
     this.now = now || (() => Date.now());
     this.random = random || Math.random;
+    this.ai = ai || null;
     this.busy = false;
     this.lastTickAt = null;
   }
@@ -43,17 +65,20 @@ class Engine {
     }
   }
 
-  rulesFor(acc, type) {
-    return this.store.data.rules.filter((r) => r.active && r.accountId === acc.id && r.type === type);
+  rulesFor(acc, ...types) {
+    return this.store.data.rules.filter((r) => r.active && r.accountId === acc.id && types.includes(r.type));
   }
 
   async pollAccount(acc) {
     const client = this.clientFactory(acc.token, acc);
     try {
       const commentRules = this.rulesFor(acc, 'comment');
-      const dmRules = this.rulesFor(acc, 'dm');
+      const messageRules = this.rulesFor(acc, 'dm', 'story');
+      const st = this.store.accountState(acc.id);
+      this.expireGates(st);
+      const waitingGates = Object.keys(st.gates).length > 0;
       if (commentRules.length) await this.pollComments(acc, client, commentRules);
-      if (dmRules.length) await this.pollMessages(acc, client, dmRules);
+      if (messageRules.length || waitingGates) await this.pollMessages(acc, client, messageRules);
       if (acc.status !== 'ok' || acc.lastError) {
         acc.status = 'ok';
         acc.lastError = null;
@@ -86,15 +111,31 @@ class Engine {
     this.store.addLog({ type: 'error', accountId: acc.id, account: acc.username, message: acc.lastError });
   }
 
-  ruleAppliesToMedia(rule, mediaId) {
-    if (rule.mediaScope !== 'selected') return true;
-    return (rule.mediaIds || []).includes(mediaId);
+  expireGates(st) {
+    for (const [k, g] of Object.entries(st.gates)) if (this.now() - Date.parse(g.at) > GATE_TTL) delete st.gates[k];
+  }
+
+  // Kural bu gönderide çalışır mı? (tüm son gönderiler / seçili / sadece Reels / tarihten sonra)
+  ruleAppliesToMedia(rule, media) {
+    switch (rule.mediaScope) {
+      case 'selected':
+        return (rule.mediaIds || []).includes(media.id);
+      case 'reels':
+        return !!media.is_reel;
+      case 'since': {
+        const since = Date.parse(rule.sinceDate || '');
+        if (Number.isNaN(since)) return true;
+        return Date.parse(media.timestamp || 0) >= since;
+      }
+      default:
+        return true;
+    }
   }
 
   async pollComments(acc, client, rules) {
     const st = this.store.accountState(acc.id);
     const recent = await client.recentMedia(this.store.settings.recentPosts || 10);
-    const mediaList = recent.filter((m) => rules.some((r) => this.ruleAppliesToMedia(r, m.id)));
+    const mediaList = recent.filter((m) => rules.some((r) => this.ruleAppliesToMedia(r, m)));
 
     // Son gönderilerde olmayan, özellikle seçilmiş eski gönderiler
     const recentIds = new Set(recent.map((m) => m.id));
@@ -127,7 +168,7 @@ class Engine {
           this.store.markSeen(acc.id, key);
           continue;
         }
-        const rule = rules.find((r) => this.ruleAppliesToMedia(r, media.id) && matchesKeywords(c.text, r.keywords));
+        const rule = rules.find((r) => this.ruleAppliesToMedia(r, media) && matchesKeywords(c.text, r.keywords));
         if (rule) {
           await this.act(acc, client, rule, {
             kind: 'comment',
@@ -167,14 +208,12 @@ class Engine {
           this.store.markSeen(acc.id, key);
           continue;
         }
-        const rule = rules.find((r) => matchesKeywords(m.message, r.keywords));
+        const kind = m.kind === 'story' ? 'story' : 'dm';
+        this.captureLead(acc, from, m.message);
+        const unlocked = await this.resolveGates(acc, client, from);
+        const rule = unlocked ? null : rules.find((r) => r.type === kind && matchesKeywords(m.message, r.keywords));
         if (rule) {
-          await this.act(acc, client, rule, {
-            kind: 'dm',
-            userId: from.id,
-            username: from.username || '',
-            text: m.message,
-          });
+          await this.act(acc, client, rule, { kind, userId: from.id, username: from.username || '', text: m.message });
         }
         this.store.markSeen(acc.id, key);
       }
@@ -182,7 +221,103 @@ class Engine {
     }
   }
 
-  async act(acc, client, rule, target) {
+  // Gelen DM'deki e-posta/telefonu kişiler listesine kaydeder
+  captureLead(acc, from, text) {
+    const { email, phone } = extractLead(text);
+    if (!email && !phone) return;
+    this.store.upsertContact(acc.id, from.id, { username: from.username, email, phone, text });
+    this.store.addLog({
+      type: 'lead',
+      accountId: acc.id,
+      account: acc.username,
+      user: from.username,
+      message: `Kişi bilgisi kaydedildi: ${[email, phone].filter(Boolean).join(', ')}`,
+    });
+  }
+
+  // Takip şartı bekleyen kişi yazınca: takip ettiyse asıl mesajı gönder
+  async resolveGates(acc, client, from) {
+    const st = this.store.accountState(acc.id);
+    const waiting = Object.entries(st.gates).filter(([, g]) => g.userId === String(from.id));
+    if (!waiting.length) return false;
+    let follows = false;
+    try {
+      follows = await client.isFollower(from.id);
+    } catch (e) {
+      if (e instanceof InstagramError && (e.isAuth || e.isRateLimit || e.type === 'network')) throw e;
+    }
+    if (!follows) {
+      this.store.addLog({
+        type: 'skip',
+        accountId: acc.id,
+        account: acc.username,
+        user: from.username,
+        message: 'Takip şartı: yazdı ama hâlâ takip etmiyor.',
+      });
+      return false;
+    }
+    for (const [k, g] of waiting) {
+      const rule = this.store.data.rules.find((r) => r.id === g.ruleId && r.active);
+      delete st.gates[k];
+      if (!rule) continue;
+      this.store.bumpStat(rule.id, 'unlocked');
+      await this.act(acc, client, rule, { ...g.target, viaGate: true }, { skipGate: true });
+    }
+    return true;
+  }
+
+  checkHourlyLimit(acc) {
+    const st = this.store.accountState(acc.id);
+    const hourAgo = this.now() - HOUR;
+    st.sendTimes = st.sendTimes.filter((t) => t > hourAgo);
+    if (st.sendTimes.length >= (this.store.settings.maxSendsPerHour || 40)) {
+      acc.lastError = 'Saatlik gönderim sınırına ulaşıldı, sıradaki mesajlar biraz sonra gönderilecek.';
+      throw new RetryLater();
+    }
+  }
+
+  // DM (ve varsa herkese açık yorum cevabı) gönderir. Başarılıysa true.
+  async deliver(acc, client, rule, target, dmText, publicText, base) {
+    try {
+      if (dmText) {
+        if (target.kind === 'comment' && !target.viaGate) await client.privateReply(target.commentId, dmText, target);
+        else await client.sendMessage(target.userId, dmText);
+      }
+      if (publicText) await client.replyToComment(target.commentId, publicText, target);
+    } catch (e) {
+      // Kimlik veya limit hatasında tüm turu durdur; yorum "görülmedi" kalır ve sonra tekrar denenir.
+      if (e instanceof InstagramError && (e.isAuth || e.isRateLimit)) throw e;
+      if (e instanceof InstagramError && e.type === 'network') throw e;
+      this.store.bumpStat(rule.id, 'errors');
+      this.store.addLog({ ...base, type: 'error', message: `Gönderilemedi: ${e.message}` });
+      return false;
+    }
+    this.store.accountState(acc.id).sendTimes.push(this.now());
+    return true;
+  }
+
+  async composeDm(acc, rule, target, vars) {
+    if (rule.replyMode !== 'ai') return fillTemplate(pickVariant(rule.dmText, this.random), vars);
+    if (!this.ai) {
+      acc.lastError = 'Yapay zekâ kullanılamıyor.';
+      throw new RetryLater();
+    }
+    try {
+      return await this.ai.reply({
+        account: acc.username,
+        instructions: rule.aiInstructions,
+        kind: target.kind,
+        username: target.username,
+        incoming: target.text,
+      });
+    } catch (e) {
+      // Ollama kapalıysa mesaj kaybolmasın: yorum/DM "görülmedi" kalır, sonra tekrar denenir
+      acc.lastError = `Yapay zekâ: ${e.message}`;
+      throw new RetryLater();
+    }
+  }
+
+  async act(acc, client, rule, target, { skipGate = false } = {}) {
     const st = this.store.accountState(acc.id);
     const settings = this.store.settings;
     const sentKey = `${rule.id}:${target.userId}`;
@@ -196,50 +331,70 @@ class Engine {
       permalink: target.permalink,
     };
 
+    if (!skipGate) {
+      this.store.bumpStat(rule.id, 'triggered');
+      this.store.upsertContact(acc.id, target.userId, { username: target.username, tag: rule.name, text: target.text });
+    }
+
     if (rule.oncePerUser && st.sentTo.includes(sentKey)) {
+      this.store.bumpStat(rule.id, 'skipped');
       this.store.addLog({ ...base, type: 'skip', message: 'Bu kişiye bu kuraldan daha önce mesaj gönderildi.' });
       return;
     }
 
     const vars = { username: target.username ? `@${target.username}` : '', kullanici: target.username ? `@${target.username}` : '' };
-    const dmText = fillTemplate(pickVariant(rule.dmText, this.random), vars);
     const publicText =
-      target.kind === 'comment' && rule.publicReplyEnabled
+      target.kind === 'comment' && !target.viaGate && rule.publicReplyEnabled
         ? fillTemplate(pickVariant(rule.publicReplyText, this.random), vars)
         : '';
 
+    // Takip şartı: takip etmeyene önce "takip et" mesajı gider
+    if (rule.followGate && !skipGate) {
+      let follows = false;
+      try {
+        follows = await client.isFollower(target.userId);
+      } catch (e) {
+        if (e instanceof InstagramError && (e.isAuth || e.isRateLimit || e.type === 'network')) throw e;
+      }
+      if (!follows) {
+        if (st.gates[sentKey]) return; // zaten takip etmesi istendi
+        const prompt = fillTemplate(pickVariant(rule.followPrompt || DEFAULT_FOLLOW_PROMPT, this.random), vars);
+        this.store.bumpStat(rule.id, 'gated');
+        if (settings.dryRun) {
+          this.store.addLog({ ...base, type: 'dry', reply: prompt, publicReply: publicText || undefined, message: 'Takip etmiyor: önce takip etmesi istenecekti.' });
+          return;
+        }
+        this.checkHourlyLimit(acc);
+        if (!(await this.deliver(acc, client, rule, target, prompt, publicText, base))) return;
+        st.gates[sentKey] = { ruleId: rule.id, userId: String(target.userId), at: new Date(this.now()).toISOString(), target };
+        this.store.addLog({
+          ...base,
+          type: 'gate',
+          reply: prompt,
+          publicReply: publicText || undefined,
+          message: 'Takip etmiyor; takip etmesi istendi. Takip edip yazınca asıl mesaj gönderilecek.',
+        });
+        return;
+      }
+    }
+
+    if (!settings.dryRun) this.checkHourlyLimit(acc);
+    const dmText = await this.composeDm(acc, rule, target, vars);
+
     if (settings.dryRun) {
+      this.store.bumpStat(rule.id, 'dry');
       this.store.addLog({ ...base, type: 'dry', reply: dmText, publicReply: publicText || undefined });
       return;
     }
 
-    const hourAgo = this.now() - HOUR;
-    st.sendTimes = st.sendTimes.filter((t) => t > hourAgo);
-    if (st.sendTimes.length >= (settings.maxSendsPerHour || 40)) {
-      acc.lastError = 'Saatlik gönderim sınırına ulaşıldı, sıradaki mesajlar biraz sonra gönderilecek.';
-      throw new RetryLater();
-    }
-
-    try {
-      if (dmText) {
-        if (target.kind === 'comment') await client.privateReply(target.commentId, dmText, target);
-        else await client.sendMessage(target.userId, dmText);
-      }
-      if (publicText) await client.replyToComment(target.commentId, publicText, target);
-    } catch (e) {
-      // Kimlik veya limit hatasında tüm turu durdur; yorum "görülmedi" kalır ve sonra tekrar denenir.
-      if (e instanceof InstagramError && (e.isAuth || e.isRateLimit)) throw e;
-      if (e instanceof InstagramError && e.type === 'network') throw e;
-      this.store.addLog({ ...base, type: 'error', message: `Gönderilemedi: ${e.message}` });
-      return;
-    }
-    st.sendTimes.push(this.now());
+    if (!(await this.deliver(acc, client, rule, target, dmText, publicText, base))) return;
+    this.store.bumpStat(rule.id, 'sent');
     if (rule.oncePerUser) {
       st.sentTo.push(sentKey);
       if (st.sentTo.length > 5000) st.sentTo.splice(0, st.sentTo.length - 5000);
     }
-    this.store.addLog({ ...base, type: 'sent', reply: dmText, publicReply: publicText || undefined });
+    this.store.addLog({ ...base, type: 'sent', reply: dmText, publicReply: publicText || undefined, message: target.viaGate ? 'Takip etti, asıl mesaj gönderildi.' : undefined });
   }
 }
 
-module.exports = { Engine, RetryLater, PRIVATE_REPLY_WINDOW, MESSAGING_WINDOW };
+module.exports = { Engine, RetryLater, extractLead, DEFAULT_FOLLOW_PROMPT, PRIVATE_REPLY_WINDOW, MESSAGING_WINDOW };

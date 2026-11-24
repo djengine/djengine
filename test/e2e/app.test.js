@@ -274,6 +274,53 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
     await page.screenshot({ path: path.join(SHOTS, '13-yapay-zeka-asistan.png') });
   });
 
+  await t.test('yapay zekâ eğitilir: Beni tanı, DM\'lerden öğren, dene-onayla-düzelt', async () => {
+    // Test modu açıkken otomatik pilot kartı uyarır
+    await page.evaluate(() => window.api.updateSettings({ dryRun: true }));
+    await page.locator('[data-testid="pilot-dry-warning"]').waitFor();
+    await page.evaluate(() => window.api.updateSettings({ dryRun: false }));
+    await page.locator('[data-testid="pilot-dry-warning"]').waitFor({ state: 'detached' });
+
+    await page.fill('[data-testid="persona-about"]', 'DJ Engine, düğün DJ\'i');
+    await page.fill('[data-testid="persona-info"]', 'Düğün paketi 15.000 TL');
+    await page.selectOption('[data-testid="persona-address"]', 'sen');
+    await page.fill('[data-testid="persona-never"]', 'İndirim sözü verme');
+    await page.click('[data-testid="persona-save"]');
+    await waitFor(async () => {
+      const s = await page.evaluate(() => window.api.state());
+      const p = s.accounts.find((a) => a.username === 'dj_engine').persona || {};
+      return p.about === 'DJ Engine, düğün DJ\'i' && p.address === 'sen' && p.never === 'İndirim sözü verme';
+    });
+
+    // Instagram'da bizzat verdiğim bir cevap örnek olarak öğrenilir; uygulamanın otomatik cevapları öğrenilmez
+    fake.addMessage(U1, { username: 'soran', text: 'set listesi paylaşır mısın?' });
+    fake.ownReply(U1, 'u-soran', 'Tabii kanka, yarın story\'de 🎧');
+    await page.click('[data-testid="learn-dms"]');
+    await waitFor(async () => (await page.locator('[data-testid="example"]').count()) === 1);
+    assert.match(await page.locator('[data-testid="example"]').textContent(), /yarın story'de/);
+
+    // Dene → onayla
+    await page.fill('[data-testid="try-text"]', 'fiyat alabilir miyim?');
+    await page.click('[data-testid="try-send"]');
+    await page.locator('[data-testid="try-reply"]').waitFor({ timeout: 15000 });
+    const sys = ollama.state.chats.at(-1).messages[0].content;
+    assert.match(sys, /DJ Engine, düğün DJ'i/);
+    assert.match(sys, /"sen" diye hitap/);
+    assert.match(ollama.state.chats.at(-1).messages[1].content, /set listesi paylaşır mısın\?/);
+    await page.click('[data-testid="try-good"]');
+    await waitFor(async () => (await page.locator('[data-testid="example"]').count()) === 2);
+
+    // Dene → düzelt
+    await page.fill('[data-testid="try-text"]', 'kapora ne kadar?');
+    await page.click('[data-testid="try-send"]');
+    await page.locator('[data-testid="try-edit"]').click();
+    await page.fill('[data-testid="try-fix"]', 'Kapora %30, kalanı düğün günü 🙌');
+    await page.click('[data-testid="try-fix-save"]');
+    await waitFor(async () => (await page.locator('[data-testid="example"]').count()) === 3);
+    assert.match(await page.locator('.examples').textContent(), /Kapora %30, kalanı düğün günü/);
+    await page.screenshot({ path: path.join(SHOTS, '14-yapay-zekayi-egit.png'), fullPage: true });
+  });
+
   await t.test('otomatik pilot: DM\'lere yapay zekâ cevap verir', async () => {
     await page.fill('[data-testid="pilot-text"]', 'DJ hizmeti. Fiyat için tarih sor.');
     await page.locator('label:has([data-testid="pilot-on"])').click();
@@ -282,12 +329,14 @@ test('uygulama uçtan uca çalışır', { timeout: 120000 }, async (t) => {
       return s.rules.some((r) => r.autopilot && r.active && r.aiInstructions === 'DJ hizmeti. Fiyat için tarih sor.');
     });
     const before = fake.state.sent.length;
-    fake.addMessage(U1, { username: 'gelin', text: 'düğün için müsait misiniz?' });
+    fake.addMessage(U1, { username: 'gelin', text: 'düğün için müsait misiniz?', pending: true });
     await page.evaluate(() => window.api.checkNow());
     await waitFor(() => fake.state.sent.length === before + 1, 15000);
     assert.equal(fake.state.sent.at(-1).text, 'Merhaba! Bilgileri hemen gönderiyorum 🙌');
     assert.equal(fake.state.sent.at(-1).to, 'u-gelin');
-    const reply = ollama.state.chats.at(-1).messages[1].content;
+    assert.equal(fake.state.approved, 1, 'mesaj isteği cevaplanmadan önce kabul edilmeli');
+    assert.match(ollama.state.chats.at(-1).messages[0].content, /DJ Engine, düğün DJ'i/);
+    const reply = ollama.state.chats.at(-1).messages.at(-1).content;
     assert.match(reply, /DJ hizmeti\. Fiyat için tarih sor\./);
     assert.match(reply, /<gelen_mesaj>\ndüğün için müsait misiniz\?/);
     await page.locator('label:has([data-testid="pilot-on"])').click();

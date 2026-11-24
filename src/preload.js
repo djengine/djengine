@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld('api', {
   aiChat: (accountId, messages) => call('ai:chat', { accountId, messages }),
   aiAutopilot: (accountId, enabled, instructions) => call('ai:autopilot', { accountId, enabled, instructions }),
   exportContacts: () => call('contacts:export'),
+  savePersona: (accountId, persona) => call('persona:save', { accountId, persona }),
+  learnFromDms: (accountId) => call('persona:learn', { accountId }),
+  aiTry: (accountId, text) => call('ai:try', { accountId, text }),
   onAiProgress: (fn) => {
     const h = (_e, p) => fn(p);
     ipcRenderer.on('ai-progress', h);

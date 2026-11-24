@@ -36,6 +36,13 @@ function createFakeInstagram() {
     expireSession(username) {
       state.accounts[username].sessionid = `expired-${Date.now()}`;
     },
+    // Hesap sahibinin Instagram'dan bizzat yazdığı cevap (uygulama dışında)
+    ownReply(username, toId, text) {
+      const t = state.threads[username].find((x) => x.with === toId);
+      const ts = String(Date.now() * 1000);
+      t.items.unshift({ item_id: bigId(), user_id: state.accounts[username].pk, timestamp: ts, item_type: 'text', text });
+      t.last_activity_at = ts;
+    },
     follow(username, followerId) {
       state.followers[username].add(followerId);
     },
@@ -51,10 +58,10 @@ function createFakeInstagram() {
       m.comments.unshift(c);
       return { id: c.pk, ...c };
     },
-    addMessage(username, { username: from, text, fromId = `u-${from}`, at = Date.now(), story = false }) {
+    addMessage(username, { username: from, text, fromId = `u-${from}`, at = Date.now(), story = false, pending = false }) {
       let t = state.threads[username].find((x) => x.with === fromId);
       if (!t) {
-        t = { thread_id: bigId(), with: fromId, users: [{ pk: fromId, username: from }], items: [] };
+        t = { thread_id: bigId(), with: fromId, pending, users: [{ pk: fromId, username: from }], items: [] };
         state.threads[username].unshift(t);
       }
       const ts = String(at * 1000); // mikrosaniye
@@ -194,11 +201,19 @@ function createFakeInstagram() {
         state.sent.push({ kind: 'public_reply', mediaId: m[1], commentId: form.replied_to_comment_id, text: form.comment_text });
         return send(res, 200, { id: bigId(), status: 'ok' });
       }
-      if (p === '/api/v1/direct_v2/inbox/') {
+      if (p === '/api/v1/direct_v2/inbox/' || p === '/api/v1/direct_v2/pending_inbox/') {
+        const wantPending = p.includes('pending');
         return send(res, 200, {
-          inbox: { threads: threads.map(({ with: _w, ...t }) => t) },
+          inbox: { threads: threads.filter((t) => !!t.pending === wantPending).map(({ with: _w, pending: _p, ...t }) => t) },
           status: 'ok',
         });
+      }
+      if ((m = p.match(/^\/api\/v1\/direct_v2\/threads\/(\d+)\/approve\/$/)) && req.method === 'POST') {
+        const t = threads.find((x) => x.thread_id === m[1]);
+        if (!t) return send(res, 404, { message: 'thread not found', status: 'fail' });
+        t.pending = false;
+        state.approved = (state.approved || 0) + 1;
+        return send(res, 200, { status: 'ok' });
       }
       if (p === '/api/v1/direct_v2/threads/broadcast/text/' && req.method === 'POST') {
         let to;
@@ -209,6 +224,13 @@ function createFakeInstagram() {
         }
         if (!form.text) return send(res, 400, { message: 'empty', status: 'fail' });
         state.sent.push({ kind: 'dm', to, text: form.text });
+        // Gönderen hesabın kendi mesajı da sohbete eklenir (gerçek Instagram gibi)
+        const t = threads.find((x) => x.with === to);
+        if (t) {
+          const ts = String(Date.now() * 1000);
+          t.items.unshift({ item_id: bigId(), user_id: acc.pk, timestamp: ts, item_type: 'text', text: form.text });
+          t.last_activity_at = ts;
+        }
         return send(res, 200, { status: 'ok', payload: { item_id: bigId() } });
       }
       send(res, 404, { message: `Bilinmeyen uç: ${req.method} ${p}`, status: 'fail' });

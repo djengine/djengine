@@ -44,3 +44,44 @@ test('asistan sohbeti hesap verisini sistem mesajında gönderir', async (t) => 
   assert.equal(sys.role, 'system');
   assert.match(sys.content, /<hesap_verileri>\nTakipçi: 1200/);
 });
+
+test('"Beni tanı" bilgileri, örnek cevaplar ve sohbet geçmişi yapay zekâya gider', async (t) => {
+  const fake = createFakeOllama({ models: [DEFAULT_MODEL] });
+  await fake.listen();
+  t.after(() => fake.close());
+  const ai = new AI(() => ({ url: fake.url }));
+  const persona = {
+    about: 'DJ Engine, düğün ve kulüp DJ\'i',
+    goals: 'Yaz sezonu düğün rezervasyonu',
+    info: 'Düğün paketi 15.000 TL. Mail: booking@dj.com',
+    address: 'sen',
+    emoji: 'az',
+    never: 'Tarih sözü verme',
+    examples: [{ in: 'fiyat ne?', out: 'Selam! Düğün paketim 15.000 TL 🎧 Tarihin ne?' }],
+  };
+  await ai.reply({
+    account: 'dj_engine', kind: 'dm', username: 'gelin', incoming: 'ağustosta müsait misin?', persona,
+    history: [{ me: false, text: 'merhaba' }, { me: true, text: 'Selam, buyur!' }],
+  });
+  const msgs = fake.state.chats.at(-1).messages;
+  assert.match(msgs[0].content, /<hakkimda>\nDJ Engine/);
+  assert.match(msgs[0].content, /<bilgilerim>\nDüğün paketi 15\.000 TL/);
+  assert.match(msgs[0].content, /"sen" diye hitap/);
+  assert.match(msgs[0].content, /<asla_yapma>\nTarih sözü verme/);
+  // Örnek: kullanıcı/asistan çifti olarak
+  assert.deepEqual([msgs[1].role, msgs[2].role], ['user', 'assistant']);
+  assert.match(msgs[1].content, /fiyat ne\?/);
+  assert.equal(msgs[2].content, 'Selam! Düğün paketim 15.000 TL 🎧 Tarihin ne?');
+  const last = msgs.at(-1).content;
+  assert.match(last, /<sohbet_gecmisi>\n@gelin: merhaba\nBen: Selam, buyur!\n<\/sohbet_gecmisi>/);
+  assert.match(last, /ağustosta müsait misin\?/);
+});
+
+test('asistan da hesap sahibinin hedeflerini bilir', async (t) => {
+  const fake = createFakeOllama({ models: [DEFAULT_MODEL] });
+  await fake.listen();
+  t.after(() => fake.close());
+  const ai = new AI(() => ({ url: fake.url }));
+  await ai.chat({ context: 'x', messages: [{ role: 'user', content: 'plan yap' }], persona: { goals: '10 bin takipçi' } });
+  assert.match(fake.state.chats.at(-1).messages[0].content, /<hedeflerim>\n10 bin takipçi/);
+});

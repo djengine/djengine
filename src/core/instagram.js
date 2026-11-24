@@ -7,6 +7,24 @@
 // DİKKAT: Bu uç noktalar resmî/belgelenmiş değildir; Instagram değiştirebilir. Otomatik
 // mesajlaşma Instagram kullanım koşullarına aykırı sayılabilir ve hesap kısıtlanabilir.
 const DEFAULT_BASE = 'https://www.instagram.com';
+// Instagram DM kutusu, gönderi listesi gibi servisleri artık www'da sunmuyor (404). Aynı servisler,
+// aynı oturum çerezleriyle i.instagram.com'da çalışıyor. Sadece web yorum servisi (/web/...) www'da.
+const API_HOST = 'https://i.instagram.com';
+
+// Hata mesajında hangi adımın başarısız olduğunu göstermek için
+const STEPS = [
+  [/^\/direct_v2\/(inbox|pending_inbox)/, 'DM kutusu okunamadı'],
+  [/^\/direct_v2\/threads\/broadcast/, 'DM gönderilemedi'],
+  [/^\/direct_v2\/threads\/[^/]+\/approve/, 'Mesaj isteği kabul edilemedi'],
+  [/^\/direct_v2\/threads/, 'Sohbet okunamadı'],
+  [/^\/feed\/user/, 'Gönderiler okunamadı'],
+  [/^\/media\/[^/]+\/comments/, 'Yorumlar okunamadı'],
+  [/^\/media/, 'Gönderi okunamadı'],
+  [/^\/web\/comments/, 'Yoruma cevap yazılamadı'],
+  [/^\/friendships/, 'Takip durumu okunamadı'],
+  [/^\/users/, 'Profil okunamadı'],
+];
+const stepOf = (path) => (STEPS.find(([re]) => re.test(path)) || [null, 'Instagram isteği başarısız'])[1];
 const WEB_APP_ID = '936619743392459';
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
@@ -70,18 +88,21 @@ class InstagramClient {
   // `session`: giriş penceresinden alınan çerezler ("sessionid=...; csrftoken=...; ds_user_id=...").
   // `browserFetch`: Electron'un tarayıcı oturumundan istek atan fetch. Verilirse çerezleri ve
   // tarayıcı kimliğini (User-Agent) oturum yönetir; Instagram istekleri gerçek tarayıcıdan gelmiş görür.
-  constructor(session, { baseUrl, fetchImpl, browserFetch } = {}) {
+  constructor(session, { baseUrl, apiBaseUrl, fetchImpl, browserFetch } = {}) {
     this.session = session;
     this.cookies = parseCookies(session);
     this.userId = this.cookies.ds_user_id || null;
     this.base = (baseUrl || process.env.IG_WEB_BASE || DEFAULT_BASE).replace(/\/$/, '');
+    // Testlerde (sahte sunucu) iki adres aynıdır
+    this.apiBase = (apiBaseUrl || (this.base === DEFAULT_BASE ? API_HOST : this.base)).replace(/\/$/, '');
     this.browser = !!browserFetch;
     this.fetch = browserFetch || fetchImpl || globalThis.fetch;
     this.threads = new Map(); // son gelen kutusu okumasındaki konuşmalar
   }
 
   async request(method, path, { params, form } = {}) {
-    const u = new URL(`${this.base}/api/v1${path}`);
+    const host = path.startsWith('/web/') ? this.base : this.apiBase;
+    const u = new URL(`${host}/api/v1${path}`);
     for (const [k, v] of Object.entries(params || {})) if (v != null) u.searchParams.set(k, String(v));
     const headers = {
       'X-IG-App-ID': WEB_APP_ID,
@@ -129,7 +150,7 @@ class InstagramClient {
       });
     }
     if (!res.ok || json.status === 'fail') {
-      throw new InstagramError(msg || `Instagram isteği başarısız (HTTP ${res.status})`, { status: res.status });
+      throw new InstagramError(`${stepOf(path)}: ${msg || 'Instagram isteği başarısız'} (HTTP ${res.status})`, { status: res.status });
     }
     return json;
   }
@@ -194,17 +215,53 @@ class InstagramClient {
     });
   }
 
+  // Gelen kutusu + mesaj istekleri (takip etmeyenlerin DM'leri "istekler"e düşer)
   async conversations(limit = 20) {
-    const r = await this.request('GET', '/direct_v2/inbox/', {
-      params: { persistentBadging: 'true', folder: '', limit, thread_message_limit: 10 },
-    });
-    const threads = (r.inbox && r.inbox.threads) || [];
+    const params = { persistentBadging: 'true', folder: '', limit, thread_message_limit: 10 };
+    const r = await this.request('GET', '/direct_v2/inbox/', { params });
+    let pending = [];
+    try {
+      const p = await this.request('GET', '/direct_v2/pending_inbox/', { params });
+      pending = (p.inbox && p.inbox.threads) || [];
+    } catch (e) {
+      if (e.isAuth || e.isRateLimit || e.type === 'network') throw e;
+    }
     this.threads.clear();
-    return threads.map((t) => {
-      const id = String(t.thread_id);
-      this.threads.set(id, t);
-      return { id, updated_time: isoMicro(t.last_activity_at) };
+    const out = [];
+    for (const [list, isPending] of [[(r.inbox && r.inbox.threads) || [], false], [pending, true]]) {
+      for (const t of list) {
+        const id = String(t.thread_id);
+        if (this.threads.has(id)) continue;
+        this.threads.set(id, { ...t, pending: isPending });
+        out.push({ id, updated_time: isoMicro(t.last_activity_at), pending: isPending });
+      }
+    }
+    return out;
+  }
+
+  // Hesap sahibinin DM'lerde verdiği gerçek cevaplar: [{ in: gelen mesaj, out: benim cevabım }]
+  async myReplies(max = 30) {
+    const r = await this.request('GET', '/direct_v2/inbox/', {
+      params: { persistentBadging: 'true', folder: '', limit: 40, thread_message_limit: 20 },
     });
+    const pairs = [];
+    for (const t of (r.inbox && r.inbox.threads) || []) {
+      const items = (t.items || []).slice().reverse(); // Instagram en yeniyi önce verir
+      let lastIn = null;
+      for (const it of items) {
+        if (it.item_type !== 'text' || !String(it.text || '').trim()) continue;
+        if (String(it.user_id) === this.userId) {
+          if (lastIn) pairs.push({ in: lastIn, out: it.text });
+          lastIn = null;
+        } else lastIn = it.text;
+      }
+    }
+    return pairs.slice(0, max);
+  }
+
+  // Mesaj isteğini kabul eder (cevap verilmeden önce; Instagram uygulamasında cevap yazınca da olur)
+  approveThread(threadId) {
+    return this.request('POST', `/direct_v2/threads/${threadId}/approve/`, { form: {} });
   }
 
   async conversationMessages(conversationId, limit = 10) {
@@ -214,7 +271,8 @@ class InstagramClient {
       t = r.thread || {};
     }
     const users = new Map((t.users || []).map((u) => [String(u.pk || u.pk_id), u.username]));
-    return (t.items || []).slice(0, limit).map((it) => {
+    // Instagram en yeniyi önce verir; eskiden yeniye çevir (aynı zaman damgasında doğru sıra korunur)
+    return (t.items || []).slice(0, limit).reverse().map((it) => {
       const from = String(it.user_id);
       // Hikâyeye cevap: item_type "reel_share" (type "reply"), metni reel_share.text içinde
       const story = it.item_type === 'reel_share' && it.reel_share && it.reel_share.type !== 'mention';

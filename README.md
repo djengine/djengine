@@ -25,6 +25,9 @@
 - **İstatistik:** Her otomasyon için tetiklenme, gönderim ve takip şartı sayıları.
 - **Ücretsiz yapay zekâ (Ollama):** Hesap analizi, haftalık içerik planı, gönderi metni, bio ve büyüme stratejisi önerileri; otomasyon cevaplarını yapay zekâ yazabilir; **Otomatik pilot** tüm DM'lere sizin yerinize cevap verir. Model Mac'inizde çalışır, ücretsizdir, veriler dışarı gönderilmez.
 
+### Yapay zekâyı eğitme
+**Yapay Zekâ → 🧠 Beni tanı** bölümünde kim olduğunuzu, hedeflerinizi, fiyat/link/iletişim bilgilerinizi, sık sorulan sorulara cevaplarınızı, üslubunuzu ve yapmaması gerekenleri yazın. **DM'lerimden öğren** Instagram'da bizzat verdiğiniz cevapları örnek olarak toplar; **Dene ve öğret** ile yapay zekânın cevabını onaylayıp ya da düzelterek ona öğretirsiniz. Yapay zekâ cevap yazarken sohbetin son mesajlarını da görür; sizin zaten cevap verdiğiniz mesajlara tekrar cevap vermez. Mesaj isteklerine (sizi takip etmeyenlerin DM'leri) de cevap verir.
+
 ### Yapay zekâ kurulumu (bir kez)
 1. [ollama.com/download](https://ollama.com/download) adresinden Ollama'yı indirip açın.
 2. Uygulamada **Yapay Zekâ** sayfasında **Modeli indir**'e basın (Gemma 3 4B, ~3,3 GB).

@@ -395,7 +395,7 @@ function renderContacts() {
 }
 
 // ---------------- Yapay Zekâ ----------------
-const ai = { status: null, checking: false, pull: null, account: null, messages: [], busy: false, autopilotDraft: null };
+const ai = { status: null, checking: false, pull: null, account: null, messages: [], busy: false, autopilotDraft: null, persona: {}, tryText: '', tryReply: null, tryBusy: false, editing: false, learning: false };
 
 // Yapay zekâ cevabını güvenli biçimde (önce kaçışlayıp) basit biçimlendirmeyle gösterir
 function mdLite(text) {
@@ -478,8 +478,10 @@ function renderAI() {
         ? '<div class="card empty">Önce bir Instagram hesabı bağlayın.<br><button class="btn primary" data-go="accounts">Hesap bağla</button></div>'
         : `
     <div class="row" style="gap:8px;margin-bottom:12px"><span class="muted">Hesap:</span><select id="ai-account" data-testid="ai-account">${accOpts}</select></div>
+    ${teachHtml(ready)}
+    ${pilotHtml(pilot, pilotText, ready)}
     <div class="card" style="margin-bottom:16px">
-      <h2>Asistan</h2>
+      <h2>💬 Asistan</h2>
       <div class="ai-actions">${AI_ACTIONS.map(([label], i) => `<button class="btn small" data-ai-action="${i}" ${ready && !ai.busy ? '' : 'disabled'}>${label}</button>`).join('')}</div>
       <div class="chat" id="ai-chat">${msgs || '<div class="muted small">Yukarıdaki hazır komutlardan birine basın ya da aşağıya sorunuzu yazın. Asistan hesabınızın son gönderilerini, takipçi sayınızı ve otomasyon istatistiklerinizi görür.</div>'}
         ${ai.busy ? '<div class="bubble assistant muted" data-testid="ai-thinking">Düşünüyor…</div>' : ''}</div>
@@ -488,13 +490,6 @@ function renderAI() {
         <button class="btn primary" type="submit" data-testid="ai-send" ${ready && !ai.busy ? '' : 'disabled'}>Gönder</button>
       </form>
       ${ai.messages.length ? '<button class="btn small" id="ai-clear" style="margin-top:8px">Sohbeti temizle</button>' : ''}
-    </div>
-    <div class="card">
-      <div class="row"><h2 style="margin:0">🤖 Otomatik pilot</h2><span class="spacer"></span>
-        <label class="switch" title="Aç / kapat"><input type="checkbox" id="pilot-on" data-testid="pilot-on" ${pilot && pilot.active ? 'checked' : ''}><span></span></label></div>
-      <p class="muted" style="margin-top:6px">Açıkken bu hesaba gelen <b>tüm DM'lere</b> yapay zekâ sizin yerinize cevap verir. Ne söyleyeceğini aşağıya yazın. Test modu açıksa cevaplar gönderilmez, Aktivite'ye yazılır.</p>
-      <textarea id="pilot-text" data-testid="pilot-text" rows="4" placeholder="Örn. Ben DJ'im. Düğün ve özel etkinlik paketleri 15.000 TL'den başlar. Müsaitlik için tarih ve şehir sor. Rezervasyon: booking@ornek.com. Kısa ve samimi yaz.">${esc(pilotText)}</textarea>
-      <button class="btn primary" id="pilot-save" data-testid="pilot-save" style="margin-top:8px">Kaydet</button>
     </div>`
     }`;
 
@@ -554,6 +549,185 @@ function renderAI() {
   if (pSave) pSave.onclick = () => savePilot(!!(pOn && pOn.checked));
   const chat = $('#ai-chat');
   if (chat) chat.scrollTop = chat.scrollHeight;
+  bindTeach();
+}
+
+// ---- Yapay zekâyı eğitme ----
+function personaOf(accId) {
+  const acc = S.accounts.find((a) => a.id === accId) || {};
+  return { ...(acc.persona || {}), ...(ai.persona[accId] || {}) };
+}
+
+function teachHtml(ready) {
+  const p = personaOf(ai.account);
+  const ex = p.examples || [];
+  const field = (k, label, ph, rows = 2) =>
+    `<label class="field"><span>${label}</span><textarea data-persona="${k}" data-testid="persona-${k}" rows="${rows}" placeholder="${esc(ph)}">${esc(p[k] || '')}</textarea></label>`;
+  const opt = (k, v, label) => `<option value="${v}" ${(p[k] || '') === v ? 'selected' : ''}>${label}</option>`;
+  return `
+    <div class="card" style="margin-bottom:16px" data-testid="teach-card">
+      <h2>🧠 Beni tanı — yapay zekâyı eğit</h2>
+      <p class="muted" style="margin-top:0">Yapay zekâ DM'lere ve yorumlara <b>sizin yerinize, sizin gibi</b> cevap verirken bunları kullanır. Ne kadar ayrıntılı yazarsanız o kadar size benzer.</p>
+      ${field('about', 'Ben kimim, ne iş yapıyorum?', "Örn. DJ Engine'im. Düğün, nişan ve kulüp etkinliklerinde çalıyorum. İstanbul'dayım, Türkiye geneline gidiyorum.")}
+      ${field('goals', 'Hedeflerim', 'Örn. Yaz sezonu için düğün rezervasyonu almak, 6 ayda 10 bin takipçiye ulaşmak.')}
+      ${field('info', 'Fiyat, link ve iletişim bilgilerim', 'Örn. Düğün paketi 15.000 TL (4 saat, ses sistemi dahil). Rezervasyon: booking@ornek.com. Mix\'ler: https://…', 3)}
+      ${field('faq', 'Sık sorulan sorular ve cevaplarım', 'S: Şehir dışına geliyor musun?\nC: Evet, yol ve konaklama ayrıca.\nS: Kapora ne kadar?\nC: %30.', 4)}
+      <div class="row" style="gap:12px;flex-wrap:wrap">
+        <label class="field" style="flex:1;min-width:160px"><span>Hitap</span><select data-persona="address" data-testid="persona-address">${opt('address', '', 'Fark etmez')}${opt('address', 'sen', '"Sen" derim')}${opt('address', 'siz', '"Siz" derim')}</select></label>
+        <label class="field" style="flex:1;min-width:160px"><span>Emoji</span><select data-persona="emoji" data-testid="persona-emoji">${opt('emoji', '', 'Fark etmez')}${opt('emoji', 'yok', 'Kullanmam')}${opt('emoji', 'az', 'Az kullanırım')}${opt('emoji', 'cok', 'Bol kullanırım')}</select></label>
+      </div>
+      ${field('tone', 'Nasıl konuşurum?', 'Örn. Samimi, kısa ve enerjik yazarım. "Kanka" demem. Cevabın sonunda tarih sorarım.')}
+      ${field('never', 'Asla yapmasın', 'Örn. İndirim sözü verme. Tarih kesinleştirme, "müsaitliğe bakıp döneceğim" de. Başka DJ önerme.')}
+      <button class="btn primary" id="persona-save" data-testid="persona-save">Kaydet</button>
+
+      <div class="divider"></div>
+      <div class="row"><h3 style="margin:0">✍️ Benim gibi yazsın — örnek cevaplarım (${ex.length})</h3><span class="spacer"></span>
+        <button class="btn small" id="learn-dms" data-testid="learn-dms" ${ai.learning ? 'disabled' : ''}>${ai.learning ? 'Okunuyor…' : "DM'lerimden öğren"}</button></div>
+      <p class="muted small">Yapay zekâ bu örneklerdeki üslubunuzu taklit eder. "DM'lerimden öğren", Instagram'da bizzat verdiğiniz cevapları toplar. Aşağıdaki deneme alanında düzelttiğiniz cevaplar da buraya eklenir.</p>
+      <div class="examples">${
+        ex.length
+          ? ex
+              .map(
+                (e, i) => `<div class="example" data-testid="example">
+                  <div class="small muted">Gelen: ${esc(e.in)}</div><div>↳ ${esc(e.out)}</div>
+                  <button class="x" data-del-example="${i}" title="Sil">×</button></div>`
+              )
+              .reverse()
+              .join('')
+          : '<div class="muted small">Henüz örnek yok.</div>'
+      }</div>
+
+      <div class="divider"></div>
+      <h3 style="margin:0 0 6px">🧪 Dene ve öğret</h3>
+      <p class="muted small" style="margin-top:0">Bir müşteri mesajı yazın, yapay zekânın ne cevap vereceğini görün. Doğruysa onaylayın, değilse düzeltin; her ikisi de yapay zekâya örnek olarak öğretilir.</p>
+      <form id="try-form" class="row" style="gap:8px">
+        <input type="text" id="try-text" data-testid="try-text" placeholder="Örn. Ağustos'ta düğünümüz var, fiyat alabilir miyim?" value="${esc(ai.tryText)}" ${ready ? '' : 'disabled'}>
+        <button class="btn" type="submit" data-testid="try-send" ${ready && !ai.tryBusy ? '' : 'disabled'}>${ai.tryBusy ? 'Yazıyor…' : 'Ne cevap verirdi?'}</button>
+      </form>
+      ${
+        ai.tryReply != null
+          ? `<div class="try-result">
+              ${
+                ai.editing
+                  ? `<textarea id="try-fix" data-testid="try-fix" rows="3">${esc(ai.tryReply)}</textarea>
+                     <div class="row" style="gap:8px;margin-top:8px"><button class="btn primary small" id="try-fix-save" data-testid="try-fix-save">Düzeltilmiş hâli öğret</button><button class="btn small" id="try-fix-cancel">Vazgeç</button></div>`
+                  : `<div class="bubble assistant" data-testid="try-reply">${esc(ai.tryReply)}</div>
+                     <div class="row" style="gap:8px;margin-top:8px"><button class="btn small" id="try-good" data-testid="try-good">👍 Doğru, böyle cevap ver</button><button class="btn small" id="try-edit" data-testid="try-edit">✏️ Düzelt</button></div>`
+              }</div>`
+          : ''
+      }
+    </div>`;
+}
+
+function pilotHtml(pilot, pilotText, ready) {
+  const acc = S.accounts.find((a) => a.id === ai.account) || {};
+  const warnings = [];
+  if (S.settings.dryRun)
+    warnings.push(`<div class="notice warn" data-testid="pilot-dry-warning"><b>Test modu açık:</b> cevaplar gönderilmiyor, sadece Aktivite'ye yazılıyor. <button class="btn small" id="pilot-dry-off" data-testid="pilot-dry-off">Gerçek gönderimi aç</button></div>`);
+  if (!ready) warnings.push('<div class="notice warn"><b>Yapay zekâ hazır değil:</b> yukarıdaki adımları tamamlayın.</div>');
+  if (acc.lastError) warnings.push(`<div class="notice err" data-testid="pilot-error"><b>Son hata:</b> ${esc(acc.lastError)}</div>`);
+  const last = pilot ? S.log.find((l) => l.rule === pilot.name && l.accountId === acc.id && (l.type === 'sent' || l.type === 'dry')) : null;
+  const st = (pilot && (S.stats || {})[pilot.id]) || {};
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <div class="row"><h2 style="margin:0">🤖 Otomatik pilot</h2><span class="spacer"></span>
+        <label class="switch" title="Aç / kapat"><input type="checkbox" id="pilot-on" data-testid="pilot-on" ${pilot && pilot.active ? 'checked' : ''}><span></span></label></div>
+      <p class="muted" style="margin-top:6px">Açıkken bu hesaba gelen <b>tüm DM'lere ve mesaj isteklerine</b> yapay zekâ, "Beni tanı" bilgilerinizle sizin yerinize cevap verir.</p>
+      ${warnings.join('')}
+      ${pilot ? `<div class="small muted" style="margin:6px 0">Toplam ${st.sent || 0} cevap gönderildi${st.dry ? `, ${st.dry} test kaydı` : ''}.${last ? ` Son: @${esc(last.user)} → “${esc(String(last.reply || '').slice(0, 80))}”` : ''}</div>` : ''}
+      <label class="field"><span>Bu hesap için ek talimat (isteğe bağlı)</span>
+      <textarea id="pilot-text" data-testid="pilot-text" rows="3" placeholder="Örn. Bu hafta indirim var: düğün paketinde %10. Müsaitlik sorana tarih ve şehri sor.">${esc(pilotText)}</textarea></label>
+      <button class="btn primary" id="pilot-save" data-testid="pilot-save" style="margin-top:8px">Kaydet</button>
+    </div>`;
+}
+
+async function savePersona(patch, msg) {
+  const next = { ...personaOf(ai.account), ...patch };
+  await run(() => api.savePersona(ai.account, next), msg);
+  delete ai.persona[ai.account];
+}
+
+function bindTeach() {
+  for (const el of document.querySelectorAll('[data-persona]')) {
+    const handler = () => {
+      ai.persona[ai.account] = { ...(ai.persona[ai.account] || {}), [el.dataset.persona]: el.value };
+    };
+    el.oninput = handler;
+    el.onchange = handler;
+  }
+  const save = $('#persona-save');
+  if (save) save.onclick = () => savePersona({}, 'Kaydedildi — yapay zekâ artık sizi tanıyor').catch(() => {});
+  const learn = $('#learn-dms');
+  if (learn)
+    learn.onclick = async () => {
+      ai.learning = true;
+      renderAI();
+      try {
+        const r = await run(() => api.learnFromDms(ai.account));
+        toast(r.added ? `${r.added} yeni örnek cevap öğrenildi` : 'Yeni örnek bulunamadı (DM\'lerde verdiğiniz cevaplar zaten ekli ya da henüz yok)');
+      } catch (_) {
+      } finally {
+        ai.learning = false;
+        renderAI();
+      }
+    };
+  for (const b of document.querySelectorAll('[data-del-example]')) {
+    b.onclick = () => {
+      const list = [...(personaOf(ai.account).examples || [])];
+      list.splice(Number(b.dataset.delExample), 1);
+      savePersona({ examples: list }, 'Örnek silindi').catch(() => {});
+    };
+  }
+  const tryForm = $('#try-form');
+  if (tryForm)
+    tryForm.onsubmit = async (e) => {
+      e.preventDefault();
+      ai.tryText = $('#try-text').value.trim();
+      if (!ai.tryText) return;
+      ai.tryBusy = true;
+      ai.tryReply = null;
+      ai.editing = false;
+      renderAI();
+      try {
+        ai.tryReply = await run(() => api.aiTry(ai.account, ai.tryText));
+      } catch (_) {
+      } finally {
+        ai.tryBusy = false;
+        renderAI();
+      }
+    };
+  const teach = (out) => {
+    const list = [...(personaOf(ai.account).examples || []), { in: ai.tryText, out, source: 'manual' }];
+    return savePersona({ examples: list }, 'Öğretildi 👍').then(() => {
+      ai.tryReply = null;
+      ai.editing = false;
+      ai.tryText = '';
+      renderAI();
+    });
+  };
+  const good = $('#try-good');
+  if (good) good.onclick = () => teach(ai.tryReply).catch(() => {});
+  const edit = $('#try-edit');
+  if (edit)
+    edit.onclick = () => {
+      ai.editing = true;
+      renderAI();
+      $('#try-fix').focus();
+    };
+  const fixSave = $('#try-fix-save');
+  if (fixSave) fixSave.onclick = () => teach($('#try-fix').value.trim()).catch(() => {});
+  const fixCancel = $('#try-fix-cancel');
+  if (fixCancel)
+    fixCancel.onclick = () => {
+      ai.editing = false;
+      renderAI();
+    };
+  const dryOff = $('#pilot-dry-off');
+  if (dryOff)
+    dryOff.onclick = () => {
+      if (confirm('Test modu kapatılsın mı? Bundan sonra eşleşen yorum ve DM\'lere gerçek mesaj gönderilecek.'))
+        run(() => api.updateSettings({ dryRun: false }), 'Gerçek gönderim açıldı').catch(() => {});
+    };
 }
 
 async function askAi(text) {

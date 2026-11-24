@@ -330,3 +330,82 @@ test('kişi bilgisi ayıklama', () => {
   assert.deepEqual(extractLead('05321234567 ara'), { email: null, phone: '05321234567' });
   assert.deepEqual(extractLead('2026 yılında 3 set'), { email: null, phone: null });
 });
+
+test('Instagram API istekleri i.instagram.com\'a, web yorum cevabı www\'ya gider (www\'da DM kutusu 404 veriyor)', async () => {
+  const urls = [];
+  const fetchImpl = async (u) => {
+    urls.push(String(u));
+    return new Response(JSON.stringify({ status: 'ok', inbox: { threads: [] }, items: [] }), { status: 200 });
+  };
+  const c = new InstagramClient('sessionid=s; ds_user_id=42; csrftoken=x', { fetchImpl, baseUrl: 'https://www.instagram.com' });
+  await c.conversations();
+  await c.recentMedia(3);
+  await c.replyToComment('99', 'tesekkurler', { mediaId: '77' });
+  assert.ok(urls.some((u) => u.startsWith('https://i.instagram.com/api/v1/direct_v2/inbox/')), urls.join('\n'));
+  assert.ok(urls.some((u) => u.startsWith('https://i.instagram.com/api/v1/feed/user/42/')), urls.join('\n'));
+  assert.ok(urls.some((u) => u.startsWith('https://www.instagram.com/api/v1/web/comments/77/add/')), urls.join('\n'));
+});
+
+test('Instagram hata mesajı hangi adımın başarısız olduğunu söyler', async () => {
+  const fetchImpl = async () => new Response('<html>yok</html>', { status: 404 });
+  const c = new InstagramClient('sessionid=s; ds_user_id=42; csrftoken=x', { fetchImpl, baseUrl: 'https://www.instagram.com' });
+  await assert.rejects(() => c.conversations(), /DM kutusu.*404/);
+});
+
+test('mesaj istekleri kutusundaki DM\'ler de okunur; cevaptan önce istek kabul edilir', async (t) => {
+  const { fake, store, engine, acc } = await setup();
+  t.after(() => fake.close());
+  store.saveRule({ name: 'Fiyat', accountId: acc.id, type: 'dm', keywords: 'fiyat', dmText: 'Fiyat listesi: x' });
+  fake.addMessage('dj_engine', { username: 'yabanci', text: 'fiyat?', pending: true });
+  await engine.tick();
+  assert.deepEqual(fake.state.sent.map((s) => s.to), ['u-yabanci']);
+  assert.equal(fake.state.approved, 1);
+});
+
+test('yapay zekâ cevabına hesap profili ve sohbet geçmişi eklenir', async (t) => {
+  const { fake, store, acc } = await setup();
+  t.after(() => fake.close());
+  const calls = [];
+  const ai = { reply: async (a) => (calls.push(a), 'tamam') };
+  const engine = new Engine({ store, clientFactory: (tk) => new InstagramClient(tk, { baseUrl: fake.url }), random: () => 0, ai });
+  acc.persona = { about: 'DJ', examples: [] };
+  store.saveRule({ name: 'AI', accountId: acc.id, type: 'dm', keywords: '', replyMode: 'ai', oncePerUser: false });
+  fake.addMessage('dj_engine', { username: 'm', text: 'selam', at: Date.now() - 2000 });
+  await engine.tick();
+  fake.addMessage('dj_engine', { username: 'm', text: 'fiyat ne?' });
+  await engine.tick();
+  const last = calls.at(-1);
+  assert.equal(last.persona.about, 'DJ');
+  assert.equal(last.incoming, 'fiyat ne?');
+  assert.deepEqual(last.history, [{ me: false, text: 'selam' }, { me: true, text: 'tamam' }]);
+});
+
+test('DM\'lerdeki gerçek cevaplarım örnek olarak toplanır', async (t) => {
+  const { fake, acc } = await setup();
+  t.after(() => fake.close());
+  const c = new InstagramClient(acc.token, { baseUrl: fake.url });
+  fake.addMessage('dj_engine', { username: 'a', text: 'set ne zaman?', at: Date.now() - 5000 });
+  await c.sendMessage('u-a', 'Cuma akşamı 22:00 🎧');
+  fake.addMessage('dj_engine', { username: 'b', text: 'cevap yok' });
+  assert.deepEqual(await c.myReplies(), [{ in: 'set ne zaman?', out: 'Cuma akşamı 22:00 🎧' }]);
+});
+
+test('hesap sahibi bir mesaja zaten bizzat cevap verdiyse otomatik cevap gönderilmez', async (t) => {
+  const { fake, store, engine, acc } = await setup();
+  t.after(() => fake.close());
+  store.saveRule({ name: 'Herkese', accountId: acc.id, type: 'dm', keywords: '', dmText: 'otomatik', oncePerUser: false });
+  fake.addMessage('dj_engine', { username: 'x', text: 'soru', at: Date.now() - 3000 });
+  fake.ownReply('dj_engine', 'u-x', 'ben cevapladım');
+  await engine.tick();
+  assert.equal(fake.state.sent.length, 0);
+  // Aynı milisaniyede gelen mesaj + benim cevabım da doğru sırada değerlendirilir
+  const now = Date.now();
+  fake.addMessage('dj_engine', { username: 'y', text: 'soru', at: now });
+  fake.ownReply('dj_engine', 'u-y', 'cevapladım');
+  await engine.tick();
+  assert.equal(fake.state.sent.length, 0);
+  // Sonra yeni bir mesaj gelirse ona cevap verilir
+  fake.addMessage('dj_engine', { username: 'x', text: 'teşekkürler' });
+  await engine.tick();
+  assert.deepEqual(fake.state.sent.map((s) => s.text), ['otomatik']);
+});

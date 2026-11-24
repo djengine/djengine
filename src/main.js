@@ -450,7 +450,55 @@ function registerIpc() {
     const acc = store.getAccount(accountId);
     if (!acc || !acc.token) throw new Error('Önce bir Instagram hesabı bağlayın.');
     const context = await accountContext(acc);
-    return ai.chat({ context, messages: messages || [] });
+    return ai.chat({ context, messages: messages || [], persona: acc.persona });
+  });
+
+  // ---- Yapay zekâyı eğitme: "Beni tanı" ----
+  const PERSONA_FIELDS = ['about', 'goals', 'info', 'faq', 'tone', 'never', 'address', 'emoji'];
+  const cleanExamples = (list) =>
+    (Array.isArray(list) ? list : [])
+      .map((e) => ({ in: String((e && e.in) || '').trim().slice(0, 1000), out: String((e && e.out) || '').trim().slice(0, 1000), source: e && e.source === 'dm' ? 'dm' : 'manual' }))
+      .filter((e) => e.in && e.out)
+      .slice(-40);
+
+  handle('persona:save', ({ accountId, persona } = {}) => {
+    const acc = store.getAccount(accountId);
+    if (!acc) throw new Error('Hesap bulunamadı.');
+    const next = { ...(acc.persona || {}) };
+    for (const k of PERSONA_FIELDS) if (persona && k in persona) next[k] = String(persona[k] || '').slice(0, 4000);
+    if (persona && 'examples' in persona) next.examples = cleanExamples(persona.examples);
+    store.updateAccount(acc.id, { persona: next });
+    contextCache.delete(acc.id);
+    return next;
+  });
+
+  // Hesap sahibinin DM'lerdeki gerçek cevaplarını örnek olarak toplar (uygulamanın otomatik gönderdikleri hariç)
+  handle('persona:learn', async ({ accountId } = {}) => {
+    const acc = store.getAccount(accountId);
+    if (!acc || !acc.token) throw new Error('Hesap bulunamadı.');
+    const auto = new Set(store.data.log.filter((l) => l.reply).map((l) => l.reply.trim()));
+    const pairs = (await clientFor(acc.token, acc.igUserId).myReplies(30)).filter((p) => !auto.has(String(p.out).trim()));
+    const existing = (acc.persona && acc.persona.examples) || [];
+    const seen = new Set(existing.map((e) => `${e.in}\u0000${e.out}`));
+    const added = pairs.filter((p) => !seen.has(`${p.in}\u0000${p.out}`)).map((p) => ({ ...p, source: 'dm' }));
+    store.updateAccount(acc.id, { persona: { ...(acc.persona || {}), examples: cleanExamples([...existing, ...added]) } });
+    return { added: added.length, found: pairs.length };
+  });
+
+  // Deneme alanı: örnek bir mesaja yapay zekâ ne cevap verirdi?
+  handle('ai:try', async ({ accountId, text } = {}) => {
+    const acc = store.getAccount(accountId);
+    if (!acc) throw new Error('Hesap bulunamadı.');
+    if (!String(text || '').trim()) throw new Error('Denemek için bir mesaj yazın.');
+    const pilot = store.data.rules.find((r) => r.autopilot && r.accountId === acc.id);
+    return ai.reply({
+      account: acc.username,
+      instructions: pilot ? pilot.aiInstructions : '',
+      kind: 'dm',
+      username: 'musteri',
+      incoming: String(text).slice(0, 1000),
+      persona: acc.persona,
+    });
   });
 
   // "Otomatik pilot": hesabın tüm DM'lerine yapay zekâ cevap verir

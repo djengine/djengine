@@ -177,6 +177,7 @@ class Engine {
             userId: fromId || `u:${username}`,
             username,
             text: c.text,
+            caption: media.caption,
             permalink: media.permalink,
           });
         }
@@ -198,13 +199,19 @@ class Engine {
       }
       const msgs = await client.conversationMessages(conv.id, 10);
       msgs.sort((a, b) => Date.parse(a.created_time) - Date.parse(b.created_time));
-      for (const m of msgs) {
+      const isOwn = (m) => (m.from || {}).id === acc.igUserId || ((m.from || {}).username && m.from.username === acc.username);
+      // Sohbetteki son kendi mesajım: ondan önceki gelen mesajlara zaten (bizzat ya da otomatik) cevap verilmiş
+      let lastOwn = -1;
+      msgs.forEach((m, i) => {
+        if (isOwn(m)) lastOwn = i;
+      });
+      for (const [i, m] of msgs.entries()) {
         const key = `m:${m.id}`;
         if (this.store.hasSeen(acc.id, key)) continue;
         const from = m.from || {};
         const ts = Date.parse(m.created_time);
-        const own = from.id === acc.igUserId || (from.username && from.username === acc.username);
-        if (own || ts < baseline || this.now() - ts > MESSAGING_WINDOW || !m.message) {
+        const own = isOwn(m);
+        if (own || i < lastOwn || ts < baseline || this.now() - ts > MESSAGING_WINDOW || !m.message) {
           this.store.markSeen(acc.id, key);
           continue;
         }
@@ -213,12 +220,31 @@ class Engine {
         const unlocked = await this.resolveGates(acc, client, from);
         const rule = unlocked ? null : rules.find((r) => r.type === kind && matchesKeywords(m.message, r.keywords));
         if (rule) {
-          await this.act(acc, client, rule, { kind, userId: from.id, username: from.username || '', text: m.message });
+          await this.act(acc, client, rule, {
+            kind,
+            userId: from.id,
+            username: from.username || '',
+            text: m.message,
+            threadId: conv.id,
+            pending: !!conv.pending,
+            history: this.historyOf(acc, msgs, m),
+          });
         }
         this.store.markSeen(acc.id, key);
       }
       st.convUpdated[conv.id] = conv.updated_time;
     }
+  }
+
+  // Yapay zekâ için sohbetin son mesajları (eskiden yeniye), şu anki mesaj hariç
+  historyOf(acc, msgs, current) {
+    const out = [];
+    for (const m of msgs) {
+      if (m.id === current.id) break;
+      if (!m.message) continue;
+      out.push({ me: (m.from || {}).id === acc.igUserId, text: String(m.message).slice(0, 500) });
+    }
+    return out.slice(-8);
   }
 
   // Gelen DM'deki e-posta/telefonu kişiler listesine kaydeder
@@ -280,6 +306,15 @@ class Engine {
   async deliver(acc, client, rule, target, dmText, publicText, base) {
     try {
       if (dmText) {
+        // Mesaj isteğiyse önce kabul et (yoksa cevap kişiye ulaşmayabilir)
+        if (target.pending && target.threadId && !target.approved) {
+          try {
+            await client.approveThread(target.threadId);
+          } catch (e) {
+            if (e instanceof InstagramError && (e.isAuth || e.isRateLimit || e.type === 'network')) throw e;
+          }
+          target.approved = true;
+        }
         if (target.kind === 'comment' && !target.viaGate) await client.privateReply(target.commentId, dmText, target);
         else await client.sendMessage(target.userId, dmText);
       }
@@ -309,6 +344,9 @@ class Engine {
         kind: target.kind,
         username: target.username,
         incoming: target.text,
+        persona: acc.persona,
+        history: target.history,
+        caption: target.caption,
       });
     } catch (e) {
       // Ollama kapalıysa mesaj kaybolmasın: yorum/DM "görülmedi" kalır, sonra tekrar denenir

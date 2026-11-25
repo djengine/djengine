@@ -126,9 +126,14 @@ class InstagramClient {
     try {
       res = await this.fetch(u, { method, headers, body, redirect: 'manual', signal: AbortSignal.timeout(20000) });
     } catch (e) {
+      // Electron'un tarayıcı bağlantısı yönlendirmede (302) cevap yerine "Redirect was cancelled"
+      // hatası fırlatır. Instagram API'de yönlendirme = giriş/doğrulama sayfası = oturum kapanmış.
+      if (/redirect/i.test(e.message || '')) {
+        throw new InstagramError('Instagram oturumu kapanmış. Hesaba yeniden giriş yapın.', { type: 'auth' });
+      }
       throw new InstagramError(`Instagram'a bağlanılamadı: ${e.message}`, { type: 'network' });
     }
-    // Oturum düşünce Instagram giriş sayfasına yönlendirir
+    // Oturum düşünce Instagram giriş (veya doğrulama) sayfasına yönlendirir
     if (res.status >= 300 && res.status < 400) {
       throw new InstagramError('Instagram oturumu kapanmış. Hesaba yeniden giriş yapın.', { status: res.status, type: 'auth' });
     }

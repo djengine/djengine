@@ -94,7 +94,7 @@ class Engine {
     const previous = acc.lastError;
     if (e instanceof InstagramError && e.type === 'network') {
       acc.status = 'offline';
-      acc.lastError = 'İnternet bağlantısı yok, bağlantı gelince devam edilecek.';
+      acc.lastError = `Instagram'a ulaşılamadı, bağlantı gelince devam edilecek. (${String(e.message).replace(/^Instagram'a bağlanılamadı: /, '')})`;
     } else if (e instanceof InstagramError && e.isAuth) {
       acc.status = 'auth';
       acc.lastError = e.message;

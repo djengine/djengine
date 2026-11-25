@@ -139,7 +139,8 @@ function createFakeInstagram() {
       const c = cookiesOf(req);
       const acc = Object.values(state.accounts).find((a) => a.sessionid === c.sessionid && a.pk === c.ds_user_id);
       if (req.headers['x-ig-app-id'] !== '936619743392459') return send(res, 400, { message: 'useragent mismatch', status: 'fail' });
-      if (!acc) return send(res, 401, { message: 'login_required', require_login: true, status: 'fail' });
+      // Gerçek Instagram oturumsuz isteği giriş sayfasına yönlendirir (302)
+      if (!acc) return html(res, 302, '', { Location: `/accounts/login/?next=${encodeURIComponent(p)}` });
       if (req.method === 'POST' && req.headers['x-csrftoken'] !== c.csrftoken) return send(res, 403, { message: 'CSRF token missing', status: 'fail' });
 
       const medias = state.media[acc.username];

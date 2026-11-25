@@ -1,7 +1,7 @@
 {
   "name": "dm-otomasyon",
   "productName": "DM Otomasyon",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Instagram yorum ve DM otomasyonu (kişisel kullanım için Mac uygulaması)",
   "main": "src/main.js",
   "private": true,
